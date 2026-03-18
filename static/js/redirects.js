@@ -23,49 +23,68 @@ const Redirects = {
         this.bindEvents();
     },
 
+    _el(id) {
+        return document.getElementById(id);
+    },
+
+    _setHtml(el, html) {
+        if (typeof el === 'string') el = this._el(el) || $(el);
+        if (el) el.innerHTML = html;
+    },
+
+    _showError(msg) {
+        const el = this._el('redirects-table-container');
+        if (el) {
+            el.innerHTML = `<div class="error-message">${escapeHtml(msg)}</div>`;
+        } else {
+            // Container hasn't rendered — write error to main content area
+            const content = $('#content');
+            if (content) content.innerHTML = `<div class="error-message">${escapeHtml(msg)}</div>`;
+        }
+    },
+
     async loadLists() {
         try {
             const data = await API.get('/api/cf/redirects/lists');
             this.lists = (data.result || []).filter(l => l.kind === 'redirect');
 
-            const sel = $('#redirect-list-select');
+            const sel = this._el('redirect-list-select');
             if (!this.lists.length) {
-                sel.innerHTML = '<option value="">No redirect lists found</option>';
-                $('#redirects-table-container').innerHTML =
-                    '<div class="info-message">No redirect lists found. Create one in the Cloudflare dashboard first.</div>';
+                this._setHtml(sel, '<option value="">No redirect lists found</option>');
+                this._setHtml(this._el('redirects-table-container'),
+                    '<div class="info-message">No redirect lists found. Create one in the Cloudflare dashboard first.</div>');
                 return;
             }
 
-            sel.innerHTML = this.lists
+            this._setHtml(sel, this.lists
                 .map(l => `<option value="${l.id}">${escapeHtml(l.name)} (${l.num_items} items)</option>`)
-                .join('');
+                .join(''));
 
             this.activeListId = this.lists[0].id;
             await this.loadItems();
         } catch (err) {
-            $('#redirects-table-container').innerHTML =
-                `<div class="error-message">Failed to load lists: ${escapeHtml(err.message)}</div>`;
+            this._showError(`Failed to load lists: ${err.message}`);
         }
     },
 
     async loadItems() {
         if (!this.activeListId) return;
-        const container = $('#redirects-table-container');
-        container.innerHTML = '<div class="loading">Loading redirects...</div>';
+        const container = this._el('redirects-table-container');
+        this._setHtml(container, '<div class="loading">Loading redirects...</div>');
 
         try {
             const data = await API.get(`/api/cf/redirects/lists/${this.activeListId}/items`);
             this.items = data.result || [];
             this.renderTable();
         } catch (err) {
-            container.innerHTML =
-                `<div class="error-message">Failed to load items: ${escapeHtml(err.message)}</div>`;
+            this._showError(`Failed to load items: ${err.message}`);
         }
     },
 
     renderTable() {
+        const container = this._el('redirects-table-container');
         if (!this.items.length) {
-            $('#redirects-table-container').innerHTML = '<div class="info-message">No redirects in this list.</div>';
+            this._setHtml(container, '<div class="info-message">No redirects in this list.</div>');
             return;
         }
 
@@ -82,13 +101,13 @@ const Redirects = {
             </tr>`;
         }).join('');
 
-        $('#redirects-table-container').innerHTML = `
+        this._setHtml(container, `
             <table class="data-table">
                 <thead><tr>
                     <th>Source URL</th><th>Target URL</th><th>Status</th><th>Actions</th>
                 </tr></thead>
                 <tbody>${rows}</tbody>
-            </table>`;
+            </table>`);
 
         // Bind delete buttons
         $$('[data-del-redirect]').forEach(btn => {
