@@ -1,0 +1,49 @@
+services:
+  cloudflared:
+    image: cloudflare/cloudflared:latest
+    container_name: 3c-tunnel
+    restart: unless-stopped
+    command: tunnel run
+    environment:
+      - TUNNEL_TOKEN=${CLOUDFLARE_TUNNEL_TOKEN}
+    networks:
+      - 3c-network
+
+  traefik:
+    image: traefik:v2.11
+    container_name: traefik
+    restart: unless-stopped
+    command:
+      - "--providers.docker=true"
+      - "--providers.docker.exposedbydefault=false"
+      - "--entrypoints.web.address=:80"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    networks:
+      - 3c-network
+
+  panel:
+    build: .
+    container_name: 3c-panel
+    restart: unless-stopped
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - /usr/bin/docker:/usr/bin/docker:ro
+      - /usr/libexec/docker/cli-plugins:/usr/libexec/docker/cli-plugins:ro
+      - ~/.config/3c/config.toml:/root/.config/3c/config.toml:ro
+      - ./apps.json:/app/apps.json
+      - ./apps:/app/apps
+      - ./.env:/app/.env:ro
+    environment:
+      - C3_GITHUB_TOKEN=${GITHUB_TOKEN:-}
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.3c.rule=Host(`3c.lol`)"
+      - "traefik.http.routers.3c.entrypoints=web"
+      - "traefik.http.services.3c.loadbalancer.server.port=8000"
+    networks:
+      - 3c-network
+
+networks:
+  3c-network:
+    name: 3c-network
