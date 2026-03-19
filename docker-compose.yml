@@ -35,7 +35,7 @@ services:
       - ./apps:/app/apps
       - ./.env:/app/.env:ro
     environment:
-      - C3_GITHUB_TOKEN=${GITHUB_TOKEN:-}
+      - GITHUB_TOKEN=${GITHUB_TOKEN:-}
     labels:
       - "traefik.enable=true"
       - "traefik.http.routers.3c.rule=Host(`3c.lol`)"

@@ -95,6 +95,30 @@ const ZoneCache = {
 };
 
 // ================================================================
+// Porkbun domain cache
+// ================================================================
+const DomainCache = {
+    data: null,
+    loading: null,
+
+    async get() {
+        if (this.data) return this.data;
+        if (this.loading) return this.loading;
+        this.loading = API.get('/api/domains').then(resp => {
+            this.data = resp.domains || [];
+            this.loading = null;
+            return this.data;
+        }).catch(err => {
+            this.loading = null;
+            throw err;
+        });
+        return this.loading;
+    },
+
+    invalidate() { this.data = null; this.loading = null; },
+};
+
+// ================================================================
 // Utility functions
 // ================================================================
 function formatBytes(bytes) {

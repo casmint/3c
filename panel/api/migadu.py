@@ -37,8 +37,24 @@ class MigaduAPI:
         resp.raise_for_status()
         return resp.json()
 
-    async def get_dns_records(self, domain: str) -> dict:
-        resp = await self.client.get(f"/domains/{domain}/dns")
+    async def get_dns_records(
+        self, domain: str, retries: int = 3, delay: float = 2.0
+    ) -> dict:
+        """Fetch DNS records, retrying on 404 (domain may still be provisioning)."""
+        import asyncio
+
+        for attempt in range(retries):
+            resp = await self.client.get(f"/domains/{domain}/dns")
+            if resp.status_code == 404 and attempt < retries - 1:
+                logger.info(
+                    "DNS records 404 for %s (attempt %d/%d), retrying in %ss",
+                    domain, attempt + 1, retries, delay,
+                )
+                await asyncio.sleep(delay)
+                continue
+            resp.raise_for_status()
+            return resp.json()
+        # Should not reach here, but just in case
         resp.raise_for_status()
         return resp.json()
 
@@ -56,6 +72,19 @@ class MigaduAPI:
         resp = await self.client.patch(f"/domains/{domain}", json=data)
         resp.raise_for_status()
         return resp.json()
+
+    async def get_catchall(self, domain: str) -> list[str]:
+        """Get catchall destinations for a domain."""
+        data = await self.get_domain(domain)
+        return data.get("catchall_destinations") or []
+
+    async def set_catchall(
+        self, domain: str, destinations: list[str]
+    ) -> dict:
+        """Set catchall destinations (pass [] to disable)."""
+        return await self.update_domain(
+            domain, {"catchall_destinations": destinations}
+        )
 
     # ------------------------------------------------------------------
     # Mailboxes

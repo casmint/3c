@@ -500,6 +500,38 @@ def create_app(config: AppConfig) -> FastAPI:
         except Exception as e:
             return _mg_error(e)
 
+    @app.get("/api/email/domains/{domain}/catchall")
+    async def api_email_get_catchall(domain: str):
+        guard = _mg_guard()
+        if guard:
+            return guard
+        try:
+            dests = await mg.get_catchall(domain)
+            return {"catchall_destinations": dests}
+        except Exception as e:
+            return _mg_error(e)
+
+    @app.post("/api/email/domains/{domain}/catchall")
+    async def api_email_set_catchall(domain: str, request: Request):
+        guard = _mg_guard()
+        if guard:
+            return guard
+        try:
+            body = await request.json()
+            return await mg.set_catchall(domain, body.get("destinations", []))
+        except Exception as e:
+            return _mg_error(e)
+
+    @app.delete("/api/email/domains/{domain}/catchall")
+    async def api_email_clear_catchall(domain: str):
+        guard = _mg_guard()
+        if guard:
+            return guard
+        try:
+            return await mg.set_catchall(domain, [])
+        except Exception as e:
+            return _mg_error(e)
+
     @app.post("/api/email/domains/{domain}/setup-dns")
     async def api_email_setup_dns(domain: str):
         """Auto-add Migadu DNS records to Cloudflare for a domain."""
@@ -732,6 +764,14 @@ def create_app(config: AppConfig) -> FastAPI:
         ok, msg = apps_mod.stop_app(a)
         return {"success": ok, "message": msg}
 
+    @app.post("/api/apps/{name}/restart")
+    async def api_restart_app(name: str):
+        a = apps_mod.get_app(name)
+        if not a:
+            return JSONResponse(status_code=404, content={"error": f"App not found: {name}"})
+        ok, msg = apps_mod.restart_app(a)
+        return {"success": ok, "message": msg}
+
     @app.post("/api/apps/{name}/delete")
     async def api_delete_app(name: str):
         a = apps_mod.get_app(name)
@@ -762,6 +802,34 @@ def create_app(config: AppConfig) -> FastAPI:
     @app.get("/api/apps/{name}/git-status")
     async def api_app_git_status(name: str):
         return apps_mod.get_git_status(name)
+
+    # ------------------------------------------------------------------
+    # Raw Containers
+    # ------------------------------------------------------------------
+
+    @app.get("/api/containers")
+    async def api_list_containers():
+        return {"containers": apps_mod.list_all_containers()}
+
+    @app.post("/api/containers/{name}/start")
+    async def api_start_container(name: str):
+        ok, msg = apps_mod.start_container(name)
+        return {"success": ok, "message": msg}
+
+    @app.post("/api/containers/{name}/stop")
+    async def api_stop_container(name: str):
+        ok, msg = apps_mod.stop_container(name)
+        return {"success": ok, "message": msg}
+
+    @app.post("/api/containers/{name}/restart")
+    async def api_restart_container(name: str):
+        ok, msg = apps_mod.restart_container(name)
+        return {"success": ok, "message": msg}
+
+    @app.get("/api/containers/{name}/logs")
+    async def api_container_logs(name: str, tail: int = 200):
+        logs = apps_mod.get_container_logs(name, tail=tail)
+        return {"logs": logs}
 
     # ------------------------------------------------------------------
     # 3C Self-Update

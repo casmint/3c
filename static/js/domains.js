@@ -10,6 +10,7 @@ const Domains = {
         content.innerHTML = `
             <div class="page-header">
                 <h1>Domains</h1>
+                <button class="btn btn-accent" id="refresh-domains-btn">Refresh All</button>
             </div>
             <div class="toolbar">
                 <input type="text" class="search-input" id="domain-search" placeholder="Search domains...">
@@ -31,10 +32,10 @@ const Domains = {
         this.bindEvents();
     },
 
-    async loadDomains() {
+    async loadDomains(forceRefresh = false) {
+        if (forceRefresh) DomainCache.invalidate();
         try {
-            const data = await API.get('/api/domains');
-            this.allDomains = data.domains || [];
+            this.allDomains = await DomainCache.get();
             this.applyFilters();
         } catch (err) {
             const container = document.getElementById('domains-table-container');
@@ -153,6 +154,16 @@ const Domains = {
             this.sortField = e.target.value;
             this.applyFilters();
         });
+        $('#refresh-domains-btn')?.addEventListener('click', async () => {
+            const btn = $('#refresh-domains-btn');
+            btn.disabled = true;
+            btn.textContent = 'Refreshing...';
+            const container = document.getElementById('domains-table-container');
+            if (container) container.innerHTML = '<div class="loading">Refreshing domains...</div>';
+            await this.loadDomains(true);
+            btn.disabled = false;
+            btn.textContent = 'Refresh All';
+        });
     },
 
     showFixCfModal(domain) {
@@ -189,6 +200,7 @@ const Domains = {
             try {
                 await API.post(`/api/domains/${domain}/fix-cf`);
                 msg.innerHTML = '<div class="success-message">Nameservers updated on Porkbun!</div>';
+                DomainCache.invalidate();
                 setTimeout(() => {
                     closeModal();
                     this.loadDomains();
@@ -240,6 +252,7 @@ const Domains = {
             try {
                 await API.post(`/api/domains/${domain}/update-ns`, { nameservers: [ns1, ns2] });
                 msg.innerHTML = '<div class="success-message">Nameservers updated!</div>';
+                DomainCache.invalidate();
                 setTimeout(() => {
                     closeModal();
                     this.loadDomains();

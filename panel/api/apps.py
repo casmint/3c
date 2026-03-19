@@ -24,7 +24,7 @@ CONTAINER_PREFIX = "3c"
 
 
 def _get_github_token() -> str:
-    return os.environ.get("C3_GITHUB_TOKEN", "")
+    return os.environ.get("GITHUB_TOKEN", os.environ.get("C3_GITHUB_TOKEN", ""))
 
 
 def _inject_github_token(repo_url: str) -> str:
@@ -204,6 +204,67 @@ def get_app_containers(app_name: str) -> list[dict]:
                 "running": state == "running",
             })
     return containers
+
+
+# ================================================================
+# Raw Container Management
+# ================================================================
+
+def list_all_containers() -> list[dict]:
+    """List all containers on the host with their status."""
+    r = _docker(
+        "ps", "-a", "--format",
+        "{{.Names}}\t{{.Image}}\t{{.Status}}\t{{.State}}\t{{.Networks}}",
+        timeout=10,
+    )
+    if r.returncode != 0:
+        return []
+    containers = []
+    for line in r.stdout.strip().split("\n"):
+        if not line.strip():
+            continue
+        parts = line.split("\t")
+        if len(parts) < 5:
+            continue
+        name, image, status_text, state, networks = parts
+        on_network = NETWORK in networks
+        # Categorize
+        if name in ("traefik", "3c-tunnel", "3c-panel"):
+            group = "core"
+        elif name.startswith("3c-") or on_network:
+            group = "app"
+        else:
+            group = "other"
+        containers.append({
+            "name": name,
+            "image": image,
+            "status_text": status_text,
+            "running": state == "running",
+            "on_network": on_network,
+            "group": group,
+        })
+    return containers
+
+
+def start_container(name: str) -> tuple[bool, str]:
+    r = _docker("start", name, timeout=30)
+    if r.returncode != 0:
+        return False, r.stderr or f"Failed to start {name}"
+    return True, f"Started {name}"
+
+
+def stop_container(name: str) -> tuple[bool, str]:
+    r = _docker("stop", name, timeout=30)
+    if r.returncode != 0:
+        return False, r.stderr or f"Failed to stop {name}"
+    return True, f"Stopped {name}"
+
+
+def restart_container(name: str) -> tuple[bool, str]:
+    r = _docker("restart", name, timeout=30)
+    if r.returncode != 0:
+        return False, r.stderr or f"Failed to restart {name}"
+    return True, f"Restarted {name}"
 
 
 # ================================================================
@@ -561,6 +622,32 @@ def stop_app(app: dict) -> tuple[bool, str]:
     if r.returncode != 0:
         return False, r.stderr or "Container not found"
     return True, f"Stopped {container_name}"
+
+
+def restart_app(app: dict) -> tuple[bool, str]:
+    """Restart an app's containers without rebuilding."""
+    app_dir = get_app_path(app)
+
+    if app["type"] == "stack":
+        override = _generate_compose_override(app)
+        try:
+            cmd = ["docker", "compose"]
+            if override:
+                cmd += ["-f", "docker-compose.yml", "-f", str(override)]
+            cmd += ["restart"]
+            r = subprocess.run(cmd, cwd=str(app_dir),
+                               capture_output=True, text=True, timeout=60)
+            if r.returncode != 0:
+                return False, r.stderr
+            return True, "Restarted"
+        except Exception as e:
+            return False, str(e)
+
+    container_name = f"3c-{app['name']}"
+    r = _docker("restart", container_name, timeout=30)
+    if r.returncode != 0:
+        return False, r.stderr or "Container not found"
+    return True, f"Restarted {container_name}"
 
 
 def delete_app_containers(app: dict) -> tuple[bool, str]:

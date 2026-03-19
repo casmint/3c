@@ -47,12 +47,20 @@ const EmailDomains = {
             const sendRecv = `
                 <span class="badge ${d.can_send ? 'badge-active' : 'badge-moved'}" style="font-size:10px">${d.can_send ? 'SEND' : 'NO SEND'}</span>
                 <span class="badge ${d.can_receive ? 'badge-active' : 'badge-moved'}" style="font-size:10px">${d.can_receive ? 'RECV' : 'NO RECV'}</span>`;
+            const catchall = (d.catchall_destinations || []);
+            const catchallHtml = catchall.length
+                ? `<span class="text-muted mono" style="font-size:10px" title="${escapeHtml(catchall.join(', '))}">*@ &rarr; ${escapeHtml(catchall[0])}${catchall.length > 1 ? ' +' + (catchall.length - 1) : ''}</span>`
+                : '<span class="text-muted" style="font-size:10px">no catchall</span>';
 
             return `<tr>
-                <td><a href="/email/domains/${encodeURIComponent(name)}" style="color:var(--text-primary);font-weight:600">${escapeHtml(name)}</a></td>
+                <td>
+                    <a href="/email/domains/${encodeURIComponent(name)}" style="color:var(--text-primary);font-weight:600">${escapeHtml(name)}</a>
+                    <div style="margin-top:2px">${catchallHtml}</div>
+                </td>
                 <td>${badge}</td>
                 <td>${sendRecv}</td>
                 <td class="actions">
+                    <button class="btn btn-sm" data-catchall-domain="${escapeHtml(name)}">Catchall</button>
                     <a href="/email/domains/${encodeURIComponent(name)}/dns" class="btn btn-sm">DNS</a>
                     <button class="btn btn-sm" data-diag-domain="${escapeHtml(name)}">Diagnostics</button>
                 </td>
@@ -70,6 +78,9 @@ const EmailDomains = {
 
         $$('[data-diag-domain]').forEach(btn => {
             btn.addEventListener('click', () => this.showDiagnosticsModal(btn.dataset.diagDomain));
+        });
+        $$('[data-catchall-domain]').forEach(btn => {
+            btn.addEventListener('click', () => this.showCatchallModal(btn.dataset.catchallDomain));
         });
     },
 
@@ -146,6 +157,98 @@ const EmailDomains = {
             });
     },
 
+    async showCatchallModal(domain) {
+        const overlay = showModal(`
+            <button class="modal-close">&times;</button>
+            <h2>Catchall: ${escapeHtml(domain)}</h2>
+            <p class="text-muted" style="font-size:12px">All unmatched incoming email will be forwarded to these addresses.</p>
+            <div id="catchall-body"><div class="loading">Loading...</div></div>`);
+
+        const body = overlay.querySelector('#catchall-body');
+
+        try {
+            const [catchData, mbData] = await Promise.all([
+                API.get(`/api/email/domains/${encodeURIComponent(domain)}/catchall`),
+                API.get(`/api/email/mailboxes/${encodeURIComponent(domain)}`).catch(() => []),
+            ]);
+
+            const current = (catchData.catchall_destinations || []).join(', ');
+            const mailboxes = Array.isArray(mbData) ? mbData : (mbData.mailboxes || []);
+            const hasCatchall = (catchData.catchall_destinations || []).length > 0;
+
+            let mbOptions = '';
+            if (mailboxes.length) {
+                const opts = mailboxes.map(m => {
+                    const addr = `${m.local_part || m.address}@${domain}`;
+                    return `<option value="${escapeHtml(addr)}">${escapeHtml(addr)}</option>`;
+                }).join('');
+                mbOptions = `
+                    <div class="form-group">
+                        <label>Quick add from mailboxes</label>
+                        <div style="display:flex;gap:6px">
+                            <select class="form-select" id="catchall-quick" style="flex:1">${opts}</select>
+                            <button class="btn btn-sm" id="catchall-quick-add">Add</button>
+                        </div>
+                    </div>`;
+            }
+
+            body.innerHTML = `
+                <div class="form-group">
+                    <label>Destination addresses (comma-separated)</label>
+                    <input type="text" class="form-input" id="catchall-input" value="${escapeHtml(current)}" placeholder="user@${escapeHtml(domain)}, other@example.com">
+                </div>
+                ${mbOptions}
+                <div id="catchall-msg"></div>
+                <div class="btn-row">
+                    ${hasCatchall ? '<button class="btn btn-danger" id="catchall-disable">Disable Catchall</button>' : ''}
+                    <button class="btn btn-accent" id="catchall-save">Save</button>
+                </div>`;
+
+            // Quick add from dropdown
+            overlay.querySelector('#catchall-quick-add')?.addEventListener('click', () => {
+                const sel = overlay.querySelector('#catchall-quick');
+                const input = overlay.querySelector('#catchall-input');
+                const val = input.value.trim();
+                const addr = sel.value;
+                if (val && !val.split(',').map(s => s.trim()).includes(addr)) {
+                    input.value = val + ', ' + addr;
+                } else if (!val) {
+                    input.value = addr;
+                }
+            });
+
+            // Save
+            overlay.querySelector('#catchall-save').addEventListener('click', async () => {
+                const msg = overlay.querySelector('#catchall-msg');
+                const raw = overlay.querySelector('#catchall-input').value.trim();
+                const destinations = raw ? raw.split(',').map(s => s.trim()).filter(Boolean) : [];
+                msg.innerHTML = '<div class="loading">Saving...</div>';
+                try {
+                    await API.post(`/api/email/domains/${encodeURIComponent(domain)}/catchall`, { destinations });
+                    msg.innerHTML = '<div class="success-message">Catchall updated.</div>';
+                    setTimeout(() => { closeModal(); this.loadDomains(); }, 800);
+                } catch (e) {
+                    msg.innerHTML = `<div class="error-message">${escapeHtml(e.message)}</div>`;
+                }
+            });
+
+            // Disable
+            overlay.querySelector('#catchall-disable')?.addEventListener('click', async () => {
+                const msg = overlay.querySelector('#catchall-msg');
+                msg.innerHTML = '<div class="loading">Disabling catchall...</div>';
+                try {
+                    await API.del(`/api/email/domains/${encodeURIComponent(domain)}/catchall`);
+                    msg.innerHTML = '<div class="success-message">Catchall disabled.</div>';
+                    setTimeout(() => { closeModal(); this.loadDomains(); }, 800);
+                } catch (e) {
+                    msg.innerHTML = `<div class="error-message">${escapeHtml(e.message)}</div>`;
+                }
+            });
+        } catch (err) {
+            body.innerHTML = `<div class="error-message">${escapeHtml(err.message)}</div>`;
+        }
+    },
+
     async showAddDomainModal() {
         let step = 1;
         let selectedDomain = '';
@@ -158,7 +261,8 @@ const EmailDomains = {
                 <div class="step active" data-step="1">1. Select</div>
                 <div class="step" data-step="2">2. DNS</div>
                 <div class="step" data-step="3">3. Setup</div>
-                <div class="step" data-step="4">4. Verify</div>
+                <div class="step" data-step="4">4. Catchall</div>
+                <div class="step" data-step="5">5. Verify</div>
             </div>
             <div id="add-domain-body"><div class="loading">Loading zones...</div></div>`);
 
@@ -213,19 +317,29 @@ const EmailDomains = {
                     await API.post('/api/email/domains', { name: selectedDomain });
                 } catch (e) {
                     // Domain may already exist on Migadu — that's ok, continue
-                    if (!e.message.includes('already exists') && !e.message.includes('409')) {
-                        msg.innerHTML = `<div class="error-message">${escapeHtml(e.message)}</div>`;
+                    if (!e.message.includes('already exists') && !e.message.includes('409') && !e.message.includes('422')) {
+                        msg.innerHTML = `<div class="error-message">Failed to create domain: ${escapeHtml(e.message)}</div>`;
                         return;
                     }
                 }
 
-                // Fetch DNS records
-                msg.innerHTML = '<div class="loading">Fetching DNS records...</div>';
+                // Fetch DNS records (backend retries on 404 automatically)
+                msg.innerHTML = '<div class="loading">Fetching DNS records (this may take a moment)...</div>';
                 try {
                     dnsRecords = await API.get(`/api/email/domains/${encodeURIComponent(selectedDomain)}/dns-records`);
                     renderStep2();
                 } catch (e) {
-                    msg.innerHTML = `<div class="error-message">${escapeHtml(e.message)}</div>`;
+                    msg.innerHTML = `<div class="error-message">Failed to fetch DNS records: ${escapeHtml(e.message)}</div>
+                        <div class="btn-row mt-8"><button class="btn btn-sm" id="retry-dns-fetch">Retry</button></div>`;
+                    overlay.querySelector('#retry-dns-fetch')?.addEventListener('click', async () => {
+                        msg.innerHTML = '<div class="loading">Retrying...</div>';
+                        try {
+                            dnsRecords = await API.get(`/api/email/domains/${encodeURIComponent(selectedDomain)}/dns-records`);
+                            renderStep2();
+                        } catch (e2) {
+                            msg.innerHTML = `<div class="error-message">${escapeHtml(e2.message)}</div>`;
+                        }
+                    });
                 }
             });
         } catch (err) {
@@ -244,21 +358,58 @@ const EmailDomains = {
                 return;
             }
 
-            const checklist = entries.map((r, i) => {
-                const type = r.type || '';
-                const name = r.name || selectedDomain;
-                const content = r.content || '';
-                const prio = r.priority != null ? ` (priority ${r.priority})` : '';
-                return `<li>
-                    <input type="checkbox" checked data-record-idx="${i}" id="dns-check-${i}">
-                    <div class="record-info">
-                        <span class="record-type">${escapeHtml(type)}</span> ${escapeHtml(name)}<br>${escapeHtml(content)}${escapeHtml(prio)}
-                    </div>
-                </li>`;
-            }).join('');
+            // Categorize records into 5 groups
+            const categories = {
+                verification: { label: 'Verification Record', icon: '&#10003;', note: 'Links your Migadu account to this domain uniquely', required: true, records: [] },
+                mx:           { label: 'MX Records',          icon: '&#10003;', note: null, required: true, records: [] },
+                dkim:         { label: 'DKIM Public Keys',     icon: '&#10003;', note: 'All keys required for key rotation without failures', required: true, records: [] },
+                spf:          { label: 'SPF Policy',           icon: '&#10003;', note: null, required: true, records: [] },
+                dmarc:        { label: 'DMARC Policy',         icon: '&#9888;',  note: 'Easy to implement and highly effective — skipping not recommended', required: false, records: [] },
+            };
 
+            entries.forEach((r, i) => {
+                const t = (r.type || '').toUpperCase();
+                const n = (r.name || '').toLowerCase();
+                const c = (r.content || '').toLowerCase();
+                r._idx = i;
+                if (t === 'MX') categories.mx.records.push(r);
+                else if (n.includes('_domainkey')) categories.dkim.records.push(r);
+                else if (n.includes('_dmarc') || c.includes('dmarc')) categories.dmarc.records.push(r);
+                else if (c.includes('spf')) categories.spf.records.push(r);
+                else categories.verification.records.push(r);
+            });
+
+            let checklist = '';
+            for (const [key, cat] of Object.entries(categories)) {
+                if (!cat.records.length) continue;
+                const isDmarc = key === 'dmarc';
+                const iconCls = isDmarc ? 'check-pending' : 'check-ok';
+                const reqLabel = cat.required ? 'required' : 'recommended';
+
+                checklist += `<li style="flex-direction:column;align-items:stretch">
+                    <div style="display:flex;align-items:center;gap:8px">
+                        <input type="checkbox" checked data-cat="${key}" id="dns-cat-${key}">
+                        <span class="check-icon ${iconCls}">${cat.icon}</span>
+                        <strong style="font-size:12px">${escapeHtml(cat.label)}</strong>
+                        <span class="text-muted" style="font-size:10px">(${reqLabel})</span>
+                    </div>
+                    <div class="record-info" style="margin-left:52px;margin-top:4px">`;
+
+                cat.records.forEach(r => {
+                    const prio = r.priority != null ? ` ${r.priority}` : '';
+                    checklist += `<div><span class="record-type">${escapeHtml(r.type || '')}</span>${prio} ${escapeHtml(r.name || selectedDomain)} &rarr; ${escapeHtml(r.content || '')}</div>`;
+                });
+
+                if (cat.note) {
+                    checklist += `<div class="${isDmarc ? 'text-danger' : 'text-muted'}" style="font-size:10px;margin-top:4px;font-style:italic">${escapeHtml(cat.note)}</div>`;
+                }
+
+                checklist += `</div></li>`;
+            }
+
+            // Also include any uncategorized leftovers (shouldn't happen, but safe)
             body.innerHTML = `
-                <p class="text-muted" style="font-size:12px">Select DNS records to add to Cloudflare for <strong>${escapeHtml(selectedDomain)}</strong>:</p>
+                <p class="text-muted" style="font-size:12px">DNS records to add to Cloudflare for <strong>${escapeHtml(selectedDomain)}</strong>:</p>
                 <ul class="dns-checklist">${checklist}</ul>
                 <div id="add-domain-msg"></div>
                 <div class="btn-row">
@@ -266,8 +417,20 @@ const EmailDomains = {
                     <button class="btn btn-accent" id="setup-dns-btn">Add to Cloudflare</button>
                 </div>`;
 
+            // Warn on DMARC uncheck
+            overlay.querySelector('#dns-cat-dmarc')?.addEventListener('change', (e) => {
+                const msg = overlay.querySelector('#add-domain-msg');
+                if (!e.target.checked) {
+                    msg.innerHTML = '<div class="error-message" style="font-size:11px">DMARC is highly recommended. Without it, spoofed emails from your domain won\'t be rejected.</div>';
+                } else {
+                    msg.innerHTML = '';
+                }
+            });
+
             overlay.querySelector('#skip-dns-btn').addEventListener('click', () => {
-                renderStep4();
+                const msg = overlay.querySelector('#add-domain-msg');
+                msg.innerHTML = '<div class="error-message" style="font-size:11px">Skipping DNS setup means your domain won\'t be able to send or receive email until records are added.</div><div class="btn-row mt-8"><button class="btn btn-sm btn-danger" id="confirm-skip-dns">Skip Anyway</button></div>';
+                overlay.querySelector('#confirm-skip-dns')?.addEventListener('click', () => renderStep4Catchall());
             });
 
             overlay.querySelector('#setup-dns-btn').addEventListener('click', () => {
@@ -315,10 +478,10 @@ const EmailDomains = {
                     ${summary}
                     ${html}
                     <div class="btn-row mt-12">
-                        <button class="btn btn-accent" id="goto-verify-btn">Run Diagnostics</button>
+                        <button class="btn btn-accent" id="goto-catchall-btn">Next: Catchall</button>
                     </div>`;
 
-                overlay.querySelector('#goto-verify-btn').addEventListener('click', () => renderStep4());
+                overlay.querySelector('#goto-catchall-btn').addEventListener('click', () => renderStep4Catchall());
             } catch (err) {
                 body.innerHTML = `
                     <div class="error-message">${escapeHtml(err.message)}</div>
@@ -330,8 +493,74 @@ const EmailDomains = {
             }
         }
 
-        async function renderStep4() {
+        async function renderStep4Catchall() {
             setStep(4);
+            // Load existing mailboxes for the quick-add dropdown
+            let mbOptions = '';
+            try {
+                const mbData = await API.get(`/api/email/mailboxes/${encodeURIComponent(selectedDomain)}`).catch(() => []);
+                const mailboxes = Array.isArray(mbData) ? mbData : (mbData.mailboxes || []);
+                if (mailboxes.length) {
+                    const opts = mailboxes.map(m => {
+                        const addr = `${m.local_part || m.address}@${selectedDomain}`;
+                        return `<option value="${escapeHtml(addr)}">${escapeHtml(addr)}</option>`;
+                    }).join('');
+                    mbOptions = `
+                        <div class="form-group">
+                            <label>Quick add from mailboxes</label>
+                            <div style="display:flex;gap:6px">
+                                <select class="form-select" id="catchall-quick" style="flex:1">${opts}</select>
+                                <button class="btn btn-sm" id="catchall-quick-add">Add</button>
+                            </div>
+                        </div>`;
+                }
+            } catch { /* ignore */ }
+
+            body.innerHTML = `
+                <p class="text-muted" style="font-size:12px">Set up a catchall address? Unmatched email to *@${escapeHtml(selectedDomain)} will be forwarded here.</p>
+                <div class="form-group">
+                    <label>Destination addresses (comma-separated)</label>
+                    <input type="text" class="form-input" id="catchall-input" placeholder="user@${escapeHtml(selectedDomain)}">
+                </div>
+                ${mbOptions}
+                <div id="catchall-msg"></div>
+                <div class="btn-row">
+                    <button class="btn" id="skip-catchall-btn">Skip</button>
+                    <button class="btn btn-accent" id="save-catchall-btn">Save Catchall</button>
+                </div>`;
+
+            overlay.querySelector('#catchall-quick-add')?.addEventListener('click', () => {
+                const sel = overlay.querySelector('#catchall-quick');
+                const input = overlay.querySelector('#catchall-input');
+                const val = input.value.trim();
+                const addr = sel.value;
+                if (val && !val.split(',').map(s => s.trim()).includes(addr)) {
+                    input.value = val + ', ' + addr;
+                } else if (!val) {
+                    input.value = addr;
+                }
+            });
+
+            overlay.querySelector('#skip-catchall-btn').addEventListener('click', () => renderStep5());
+
+            overlay.querySelector('#save-catchall-btn').addEventListener('click', async () => {
+                const msg = overlay.querySelector('#catchall-msg');
+                const raw = overlay.querySelector('#catchall-input').value.trim();
+                if (!raw) { msg.innerHTML = '<div class="error-message">Enter at least one address or click Skip</div>'; return; }
+                const destinations = raw.split(',').map(s => s.trim()).filter(Boolean);
+                msg.innerHTML = '<div class="loading">Saving catchall...</div>';
+                try {
+                    await API.post(`/api/email/domains/${encodeURIComponent(selectedDomain)}/catchall`, { destinations });
+                    msg.innerHTML = '<div class="success-message">Catchall configured.</div>';
+                    setTimeout(() => renderStep5(), 800);
+                } catch (e) {
+                    msg.innerHTML = `<div class="error-message">${escapeHtml(e.message)}</div>`;
+                }
+            });
+        }
+
+        async function renderStep5() {
+            setStep(5);
             body.innerHTML = '<div class="loading">Running diagnostics...</div>';
 
             try {
@@ -358,7 +587,7 @@ const EmailDomains = {
                     }
                 });
 
-                overlay.querySelector('#rerun-diag-btn').addEventListener('click', () => renderStep4());
+                overlay.querySelector('#rerun-diag-btn').addEventListener('click', () => renderStep5());
             } catch (err) {
                 body.innerHTML = `
                     <div class="error-message">${escapeHtml(err.message)}</div>
@@ -367,7 +596,7 @@ const EmailDomains = {
                         <button class="btn" onclick="closeModal()">Close</button>
                         <button class="btn" id="retry-diag-btn">Retry</button>
                     </div>`;
-                overlay.querySelector('#retry-diag-btn')?.addEventListener('click', () => renderStep4());
+                overlay.querySelector('#retry-diag-btn')?.addEventListener('click', () => renderStep5());
             }
         }
     },

@@ -92,7 +92,7 @@ const Zones = {
             <h2>Add Zone</h2>
             <div class="form-group">
                 <label>Domain Name</label>
-                <input type="text" class="form-input" id="new-zone-name" placeholder="example.com">
+                <div id="zone-select-container"><div class="loading" style="font-size:12px">Loading domains...</div></div>
             </div>
             <div id="add-zone-msg"></div>
             <div class="btn-row">
@@ -100,11 +100,63 @@ const Zones = {
             </div>
             <div id="add-zone-result" class="hidden"></div>`);
 
+        const selectContainer = overlay.querySelector('#zone-select-container');
+
+        // Try to load Porkbun domains for dropdown, fall back to text input
+        let usePorkbun = false;
+        try {
+            const pb = await API.get('/api/porkbun/available');
+            if (pb.available) {
+                const domains = await DomainCache.get();
+                // Filter out domains that already have CF zones
+                const existingZones = new Set(this.allZones.map(z => z.name));
+                const available = domains.filter(d => !existingZones.has(d.domain));
+
+                if (available.length) {
+                    usePorkbun = true;
+                    const options = available
+                        .sort((a, b) => a.domain.localeCompare(b.domain))
+                        .map(d => `<option value="${escapeHtml(d.domain)}">${escapeHtml(d.domain)}</option>`)
+                        .join('');
+
+                    selectContainer.innerHTML = `
+                        <input type="text" class="form-input" id="zone-domain-search" placeholder="Type to filter..." style="margin-bottom:6px">
+                        <select class="form-select" id="new-zone-name" size="8" style="width:100%;height:auto">
+                            ${options}
+                        </select>
+                        <p class="text-muted" style="font-size:10px;margin-top:4px">${available.length} domains not yet on Cloudflare</p>`;
+
+                    // Wire up search filter
+                    const searchInput = overlay.querySelector('#zone-domain-search');
+                    const select = overlay.querySelector('#new-zone-name');
+                    searchInput.addEventListener('input', () => {
+                        const q = searchInput.value.toLowerCase();
+                        const filtered = available.filter(d => d.domain.toLowerCase().includes(q));
+                        select.innerHTML = filtered
+                            .map(d => `<option value="${escapeHtml(d.domain)}">${escapeHtml(d.domain)}</option>`)
+                            .join('');
+                    });
+                    // Auto-select first
+                    if (select.options.length) select.options[0].selected = true;
+                } else {
+                    // All domains already on CF
+                    selectContainer.innerHTML = `
+                        <input type="text" class="form-input" id="new-zone-name" placeholder="example.com">
+                        <p class="text-muted" style="font-size:10px;margin-top:4px">All Porkbun domains already on Cloudflare</p>`;
+                }
+            } else {
+                selectContainer.innerHTML = '<input type="text" class="form-input" id="new-zone-name" placeholder="example.com">';
+            }
+        } catch {
+            selectContainer.innerHTML = '<input type="text" class="form-input" id="new-zone-name" placeholder="example.com">';
+        }
+
         overlay.querySelector('#add-zone-submit').addEventListener('click', async () => {
-            const name = overlay.querySelector('#new-zone-name').value.trim();
+            const nameEl = overlay.querySelector('#new-zone-name');
+            const name = nameEl.value.trim();
             const msg = overlay.querySelector('#add-zone-msg');
             const result = overlay.querySelector('#add-zone-result');
-            if (!name) { msg.innerHTML = '<div class="error-message">Enter a domain name</div>'; return; }
+            if (!name) { msg.innerHTML = '<div class="error-message">Select or enter a domain name</div>'; return; }
 
             msg.innerHTML = '<div class="loading">Creating zone...</div>';
             overlay.querySelector('#add-zone-submit').disabled = true;
@@ -116,35 +168,33 @@ const Zones = {
 
                 msg.innerHTML = `<div class="success-message">Zone created! Nameservers: ${ns.join(', ')}</div>`;
 
-                // Check Porkbun availability
-                try {
-                    const pb = await API.get('/api/porkbun/available');
-                    if (pb.available) {
-                        result.classList.remove('hidden');
-                        result.innerHTML = `
-                            <div class="mt-16">
-                                <p class="mb-12">Update nameservers on Porkbun now?</p>
-                                <div class="info-message">${ns.join('<br>')}</div>
-                                <div class="btn-row">
-                                    <button class="btn btn-accent" id="porkbun-ns-btn">Update on Porkbun</button>
-                                </div>
-                                <div id="porkbun-ns-msg"></div>
-                            </div>`;
-                        result.querySelector('#porkbun-ns-btn').addEventListener('click', async () => {
-                            const pbMsg = result.querySelector('#porkbun-ns-msg');
-                            pbMsg.innerHTML = '<div class="loading">Updating nameservers...</div>';
-                            try {
-                                await API.post(`/api/porkbun/ns/${name}`, { nameservers: ns });
-                                pbMsg.innerHTML = '<div class="success-message">Nameservers updated on Porkbun!</div>';
-                            } catch (e) {
-                                pbMsg.innerHTML = `<div class="error-message">Porkbun error: ${escapeHtml(e.message)}</div>`;
-                            }
-                        });
-                    } else {
-                        result.classList.remove('hidden');
-                        result.innerHTML = '<div class="info-message mt-16">Update these nameservers manually at your registrar.</div>';
-                    }
-                } catch { /* ignore porkbun check failure */ }
+                // Offer to update NS on Porkbun if available
+                if (usePorkbun) {
+                    result.classList.remove('hidden');
+                    result.innerHTML = `
+                        <div class="mt-16">
+                            <p class="mb-12">Update nameservers on Porkbun now?</p>
+                            <div class="info-message mono" style="font-size:12px">${ns.join('<br>')}</div>
+                            <div class="btn-row">
+                                <button class="btn btn-accent" id="porkbun-ns-btn">Update on Porkbun</button>
+                            </div>
+                            <div id="porkbun-ns-msg"></div>
+                        </div>`;
+                    result.querySelector('#porkbun-ns-btn').addEventListener('click', async () => {
+                        const pbMsg = result.querySelector('#porkbun-ns-msg');
+                        pbMsg.innerHTML = '<div class="loading">Updating nameservers...</div>';
+                        try {
+                            await API.post(`/api/porkbun/ns/${name}`, { nameservers: ns });
+                            pbMsg.innerHTML = '<div class="success-message">Nameservers updated on Porkbun!</div>';
+                            DomainCache.invalidate();
+                        } catch (e) {
+                            pbMsg.innerHTML = `<div class="error-message">Porkbun error: ${escapeHtml(e.message)}</div>`;
+                        }
+                    });
+                } else {
+                    result.classList.remove('hidden');
+                    result.innerHTML = '<div class="info-message mt-16">Update these nameservers manually at your registrar.</div>';
+                }
 
                 ZoneCache.invalidate();
             } catch (err) {
