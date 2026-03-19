@@ -49,7 +49,7 @@ class MigaduAPI:
 
         last_resp = None
         for attempt in range(retries):
-            resp = await self.client.get(f"/domains/{domain}/dns")
+            resp = await self.client.get(f"/domains/{domain}/records")
             last_resp = resp
             if resp.status_code == 404 and attempt < retries - 1:
                 logger.info(
