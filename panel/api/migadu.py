@@ -38,13 +38,19 @@ class MigaduAPI:
         return resp.json()
 
     async def get_dns_records(
-        self, domain: str, retries: int = 3, delay: float = 2.0
+        self, domain: str, retries: int = 5, delay: float = 2.0,
+        initial_delay: float = 0,
     ) -> dict:
         """Fetch DNS records, retrying on 404 (domain may still be provisioning)."""
         import asyncio
 
+        if initial_delay > 0:
+            await asyncio.sleep(initial_delay)
+
+        last_resp = None
         for attempt in range(retries):
             resp = await self.client.get(f"/domains/{domain}/dns")
+            last_resp = resp
             if resp.status_code == 404 and attempt < retries - 1:
                 logger.info(
                     "DNS records 404 for %s (attempt %d/%d), retrying in %ss",
@@ -54,9 +60,8 @@ class MigaduAPI:
                 continue
             resp.raise_for_status()
             return resp.json()
-        # Should not reach here, but just in case
-        resp.raise_for_status()
-        return resp.json()
+        last_resp.raise_for_status()
+        return last_resp.json()
 
     async def run_diagnostics(self, domain: str) -> dict:
         resp = await self.client.get(f"/domains/{domain}/diagnostics")

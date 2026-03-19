@@ -323,10 +323,10 @@ const EmailDomains = {
                     }
                 }
 
-                // Fetch DNS records (backend retries on 404 automatically)
+                // Fetch DNS records — wait=2 gives Migadu time to provision, backend retries on 404
                 msg.innerHTML = '<div class="loading">Fetching DNS records (this may take a moment)...</div>';
                 try {
-                    dnsRecords = await API.get(`/api/email/domains/${encodeURIComponent(selectedDomain)}/dns-records`);
+                    dnsRecords = await API.get(`/api/email/domains/${encodeURIComponent(selectedDomain)}/dns-records?wait=2`);
                     renderStep2();
                 } catch (e) {
                     msg.innerHTML = `<div class="error-message">Failed to fetch DNS records: ${escapeHtml(e.message)}</div>

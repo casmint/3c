@@ -471,12 +471,15 @@ def create_app(config: AppConfig) -> FastAPI:
             return _mg_error(e)
 
     @app.get("/api/email/domains/{domain}/dns-records")
-    async def api_email_dns_records(domain: str):
+    async def api_email_dns_records(domain: str, wait: float = 0):
         guard = _mg_guard()
         if guard:
             return guard
         try:
-            return await mg.get_dns_records(domain)
+            initial_delay = min(max(wait, 0), 10)
+            return await mg.get_dns_records(
+                domain, initial_delay=initial_delay
+            )
         except Exception as e:
             return _mg_error(e)
 
