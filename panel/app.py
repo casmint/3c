@@ -8,6 +8,7 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from panel.api.cloudflare import CloudflareAPI
+from panel.api.migadu import MigaduAPI
 from panel.api.porkbun import PorkbunAPI
 from panel.config import AppConfig
 
@@ -21,6 +22,11 @@ def create_app(config: AppConfig) -> FastAPI:
     pb = (
         PorkbunAPI(config.porkbun.api_key, config.porkbun.secret_api_key)
         if config.porkbun
+        else None
+    )
+    mg = (
+        MigaduAPI(config.migadu.email, config.migadu.api_key)
+        if config.migadu
         else None
     )
 
@@ -62,7 +68,7 @@ def create_app(config: AppConfig) -> FastAPI:
 
     @app.get("/api/config/status")
     async def api_config_status():
-        return {"cloudflare": True, "porkbun": pb is not None}
+        return {"cloudflare": True, "porkbun": pb is not None, "migadu": mg is not None}
 
     # ------------------------------------------------------------------
     # Zones
@@ -378,6 +384,274 @@ def create_app(config: AppConfig) -> FastAPI:
             return {"success": True, "nameservers": cf_ns, "result": result}
         except Exception as e:
             return _pb_error(e)
+
+    # ------------------------------------------------------------------
+    # Migadu
+    # ------------------------------------------------------------------
+
+    def _mg_error(e: Exception) -> JSONResponse:
+        if isinstance(e, httpx.HTTPStatusError):
+            detail = e.response.text
+            try:
+                body = e.response.json()
+                if body.get("error"):
+                    detail = body["error"]
+            except Exception:
+                pass
+            return JSONResponse(
+                status_code=e.response.status_code,
+                content={"error": detail, "detail": detail},
+            )
+        if isinstance(e, httpx.RequestError):
+            return JSONResponse(
+                status_code=502,
+                content={"error": "Failed to reach Migadu API", "detail": str(e)},
+            )
+        return JSONResponse(
+            status_code=500,
+            content={"error": str(e), "detail": str(e)},
+        )
+
+    def _mg_guard() -> JSONResponse | None:
+        if not mg:
+            return JSONResponse(
+                status_code=400,
+                content={"error": "Migadu API credentials not configured"},
+            )
+        return None
+
+    @app.get("/api/email/available")
+    async def api_migadu_available():
+        return {"available": mg is not None}
+
+    # -- Domains --
+
+    @app.get("/api/email/domains")
+    async def api_email_list_domains():
+        guard = _mg_guard()
+        if guard:
+            return guard
+        try:
+            return await mg.list_domains()
+        except Exception as e:
+            return _mg_error(e)
+
+    @app.post("/api/email/domains")
+    async def api_email_create_domain(request: Request):
+        guard = _mg_guard()
+        if guard:
+            return guard
+        try:
+            body = await request.json()
+            return await mg.create_domain(body["name"])
+        except Exception as e:
+            return _mg_error(e)
+
+    @app.get("/api/email/domains/{domain}")
+    async def api_email_get_domain(domain: str):
+        guard = _mg_guard()
+        if guard:
+            return guard
+        try:
+            return await mg.get_domain(domain)
+        except Exception as e:
+            return _mg_error(e)
+
+    @app.patch("/api/email/domains/{domain}")
+    async def api_email_update_domain(domain: str, request: Request):
+        guard = _mg_guard()
+        if guard:
+            return guard
+        try:
+            body = await request.json()
+            return await mg.update_domain(domain, body)
+        except Exception as e:
+            return _mg_error(e)
+
+    @app.get("/api/email/domains/{domain}/dns-records")
+    async def api_email_dns_records(domain: str):
+        guard = _mg_guard()
+        if guard:
+            return guard
+        try:
+            return await mg.get_dns_records(domain)
+        except Exception as e:
+            return _mg_error(e)
+
+    @app.get("/api/email/domains/{domain}/diagnostics")
+    async def api_email_diagnostics(domain: str):
+        guard = _mg_guard()
+        if guard:
+            return guard
+        try:
+            return await mg.run_diagnostics(domain)
+        except Exception as e:
+            return _mg_error(e)
+
+    @app.post("/api/email/domains/{domain}/activate")
+    async def api_email_activate_domain(domain: str):
+        guard = _mg_guard()
+        if guard:
+            return guard
+        try:
+            return await mg.activate_domain(domain)
+        except Exception as e:
+            return _mg_error(e)
+
+    @app.post("/api/email/domains/{domain}/setup-dns")
+    async def api_email_setup_dns(domain: str):
+        """Auto-add Migadu DNS records to Cloudflare for a domain."""
+        guard = _mg_guard()
+        if guard:
+            return guard
+        try:
+            # 1. Get required DNS records from Migadu
+            dns_data = await mg.get_dns_records(domain)
+
+            # 2. Find the CF zone for this domain
+            zone = await cf.resolve_zone(domain)
+            if not zone:
+                return JSONResponse(
+                    status_code=404,
+                    content={"error": f"No Cloudflare zone found for {domain}"},
+                )
+            zone_id = zone["id"]
+
+            # 3. Map Migadu records to CF format
+            cf_records = []
+            for entry in dns_data.get("entries", []):
+                rec = {
+                    "type": entry.get("type", ""),
+                    "name": entry.get("name", domain),
+                    "content": entry.get("content", ""),
+                    "ttl": 1,
+                    "proxied": False,
+                }
+                if entry.get("priority") is not None:
+                    rec["priority"] = int(entry["priority"])
+                cf_records.append(rec)
+
+            # 4. Create all records via the batch function
+            result = await cf.add_dns_records(zone_id, cf_records)
+            return result
+        except Exception as e:
+            return _mg_error(e)
+
+    # -- Mailboxes --
+
+    @app.get("/api/email/mailboxes/{domain}")
+    async def api_email_list_mailboxes(domain: str):
+        guard = _mg_guard()
+        if guard:
+            return guard
+        try:
+            return await mg.list_mailboxes(domain)
+        except Exception as e:
+            return _mg_error(e)
+
+    @app.post("/api/email/mailboxes/{domain}")
+    async def api_email_create_mailbox(domain: str, request: Request):
+        guard = _mg_guard()
+        if guard:
+            return guard
+        try:
+            body = await request.json()
+            return await mg.create_mailbox(domain, body)
+        except Exception as e:
+            return _mg_error(e)
+
+    @app.put("/api/email/mailboxes/{domain}/{local_part}")
+    async def api_email_update_mailbox(
+        domain: str, local_part: str, request: Request
+    ):
+        guard = _mg_guard()
+        if guard:
+            return guard
+        try:
+            body = await request.json()
+            return await mg.update_mailbox(domain, local_part, body)
+        except Exception as e:
+            return _mg_error(e)
+
+    @app.delete("/api/email/mailboxes/{domain}/{local_part}")
+    async def api_email_delete_mailbox(domain: str, local_part: str):
+        guard = _mg_guard()
+        if guard:
+            return guard
+        try:
+            return await mg.delete_mailbox(domain, local_part)
+        except Exception as e:
+            return _mg_error(e)
+
+    # -- Aliases --
+
+    @app.get("/api/email/aliases/{domain}")
+    async def api_email_list_aliases(domain: str):
+        guard = _mg_guard()
+        if guard:
+            return guard
+        try:
+            return await mg.list_aliases(domain)
+        except Exception as e:
+            return _mg_error(e)
+
+    @app.post("/api/email/aliases/{domain}")
+    async def api_email_create_alias(domain: str, request: Request):
+        guard = _mg_guard()
+        if guard:
+            return guard
+        try:
+            body = await request.json()
+            return await mg.create_alias(domain, body)
+        except Exception as e:
+            return _mg_error(e)
+
+    @app.delete("/api/email/aliases/{domain}/{local_part}")
+    async def api_email_delete_alias(domain: str, local_part: str):
+        guard = _mg_guard()
+        if guard:
+            return guard
+        try:
+            return await mg.delete_alias(domain, local_part)
+        except Exception as e:
+            return _mg_error(e)
+
+    # -- Identities --
+
+    @app.get("/api/email/identities/{domain}/{mailbox}")
+    async def api_email_list_identities(domain: str, mailbox: str):
+        guard = _mg_guard()
+        if guard:
+            return guard
+        try:
+            return await mg.list_identities(domain, mailbox)
+        except Exception as e:
+            return _mg_error(e)
+
+    @app.post("/api/email/identities/{domain}/{mailbox}")
+    async def api_email_create_identity(
+        domain: str, mailbox: str, request: Request
+    ):
+        guard = _mg_guard()
+        if guard:
+            return guard
+        try:
+            body = await request.json()
+            return await mg.create_identity(domain, mailbox, body)
+        except Exception as e:
+            return _mg_error(e)
+
+    @app.delete("/api/email/identities/{domain}/{mailbox}/{id_local}")
+    async def api_email_delete_identity(
+        domain: str, mailbox: str, id_local: str
+    ):
+        guard = _mg_guard()
+        if guard:
+            return guard
+        try:
+            return await mg.delete_identity(domain, mailbox, id_local)
+        except Exception as e:
+            return _mg_error(e)
 
     # ------------------------------------------------------------------
     # Apps — registry

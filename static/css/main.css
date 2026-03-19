@@ -738,3 +738,165 @@ a:hover { text-decoration: underline; }
     word-break: break-all;
     margin: 0;
 }
+
+/* ================================================================
+   Email Module
+   ================================================================ */
+
+.step-indicator {
+    display: flex;
+    gap: 0;
+    margin-bottom: 20px;
+    border-bottom: 1px solid var(--border);
+    padding-bottom: 12px;
+}
+
+.step-indicator .step {
+    flex: 1;
+    text-align: center;
+    padding: 6px 8px;
+    font-size: 11px;
+    color: var(--text-muted);
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    border-bottom: 2px solid transparent;
+    margin-bottom: -13px;
+}
+
+.step-indicator .step.active {
+    color: var(--accent);
+    border-bottom-color: var(--accent);
+    font-weight: 600;
+}
+
+.step-indicator .step.done {
+    color: var(--success);
+    border-bottom-color: var(--success);
+}
+
+.dns-checklist {
+    list-style: none;
+    padding: 0;
+    margin: 12px 0;
+}
+
+.dns-checklist li {
+    padding: 8px 12px;
+    border: 1px solid var(--border);
+    margin-bottom: 4px;
+    display: flex;
+    align-items: flex-start;
+    gap: 10px;
+    font-size: 12px;
+}
+
+.dns-checklist li .check-icon { width: 18px; flex-shrink: 0; text-align: center; }
+.dns-checklist li .check-ok { color: var(--success); }
+.dns-checklist li .check-fail { color: var(--danger); }
+.dns-checklist li .check-pending { color: var(--text-muted); }
+
+.dns-checklist li .record-info {
+    flex: 1;
+    font-family: var(--font-mono);
+    font-size: 11px;
+    color: var(--text-secondary);
+    line-height: 1.5;
+}
+
+.dns-checklist li .record-type {
+    font-weight: 600;
+    color: var(--text-primary);
+}
+
+.mailbox-expand {
+    background: var(--bg-tertiary);
+    padding: 12px 16px;
+    border: 1px solid var(--border);
+    border-top: none;
+}
+
+.mailbox-expand h4 {
+    font-size: 11px;
+    font-weight: 600;
+    margin: 0 0 8px 0;
+    color: var(--text-secondary);
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+}
+
+.sub-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 12px;
+    margin-bottom: 12px;
+}
+
+.sub-table td {
+    padding: 4px 8px;
+    border-bottom: 1px solid var(--border);
+}
+
+.sub-table .actions { text-align: right; }
+
+.inline-form {
+    display: flex;
+    gap: 8px;
+    align-items: center;
+    margin-top: 8px;
+}
+
+.inline-form input {
+    padding: 4px 8px;
+    background: var(--bg-input);
+    border: 1px solid var(--border);
+    color: var(--text-primary);
+    font-family: var(--font-mono);
+    font-size: 12px;
+}
+
+.inline-form input:focus {
+    border-color: var(--accent);
+    outline: none;
+}
+
+.email-domain-header {
+    display: flex;
+    align-items: center;
+    gap: 16px;
+    padding: 12px 0;
+    margin-bottom: 20px;
+    border-bottom: 1px solid var(--border);
+}
+
+.email-domain-header select {
+    padding: 6px 10px;
+    background: var(--bg-input);
+    border: 1px solid var(--border);
+    color: var(--text-primary);
+    font-family: var(--font-mono);
+    font-size: 13px;
+}
+
+.email-domain-header select:focus {
+    border-color: var(--accent);
+    outline: none;
+}
+
+.diag-list {
+    list-style: none;
+    padding: 0;
+    margin: 12px 0;
+}
+
+.diag-list li {
+    padding: 6px 0;
+    border-bottom: 1px solid var(--border);
+    font-size: 12px;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+
+.diag-list li .diag-ok { color: var(--success); }
+.diag-list li .diag-fail { color: var(--danger); }
+.diag-list li .diag-warn { color: var(--warning); }

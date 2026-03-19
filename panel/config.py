@@ -22,9 +22,16 @@ class PorkbunConfig:
 
 
 @dataclass
+class MigaduConfig:
+    email: str
+    api_key: str
+
+
+@dataclass
 class AppConfig:
     cloudflare: CloudflareConfig
     porkbun: Optional[PorkbunConfig] = None
+    migadu: Optional[MigaduConfig] = None
 
 
 def load_config() -> AppConfig:
@@ -47,6 +54,11 @@ Create {CONFIG_PATH} with the following structure:
     api_key = "your-porkbun-api-key"
     secret_api_key = "your-porkbun-secret-key"
     # Porkbun section is optional — remove if not using
+
+    [migadu]
+    email = "admin@yourdomain.com"
+    api_key = "your-migadu-api-key"
+    # Migadu section is optional — remove if not using
 
 Then set permissions:
 
@@ -94,4 +106,13 @@ See README.md for required Cloudflare API token scopes.
             secret_api_key=pb_raw["secret_api_key"],
         )
 
-    return AppConfig(cloudflare=cf, porkbun=pb)
+    # Optional migadu section
+    mg = None
+    mg_raw = raw.get("migadu")
+    if mg_raw and mg_raw.get("email") and mg_raw.get("api_key"):
+        mg = MigaduConfig(
+            email=mg_raw["email"],
+            api_key=mg_raw["api_key"],
+        )
+
+    return AppConfig(cloudflare=cf, porkbun=pb, migadu=mg)

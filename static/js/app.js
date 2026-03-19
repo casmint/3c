@@ -39,6 +39,19 @@ const API = {
         return resp.json();
     },
 
+    async put(path, body) {
+        const resp = await fetch(path, {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(body),
+        });
+        if (!resp.ok) {
+            const err = await resp.json().catch(() => ({ error: resp.statusText }));
+            throw new Error(err.error || err.detail || resp.statusText);
+        }
+        return resp.json();
+    },
+
     async del(path, body) {
         const opts = { method: 'DELETE' };
         if (body) {
@@ -236,6 +249,12 @@ const Sidebar = {
         { emoji: '🌍', label: 'Pages',     route: '/cf/pages',     prefix: '/cf/pages' },
     ],
 
+    emailSubs: [
+        { emoji: '🌐', label: 'Domains',   route: '/email/domains',   prefix: '/email/domains' },
+        { emoji: '📬', label: 'Mailboxes', route: '/email/mailboxes', prefix: '/email/mailboxes' },
+        { emoji: '🌍', label: 'Webmail',   href: 'https://webmail.migadu.com', external: true },
+    ],
+
     render() {
         const primary = $('#sidebar-primary');
         primary.innerHTML = this.sections
@@ -248,9 +267,18 @@ const Sidebar = {
         });
 
         const secondary = $('#sidebar-secondary');
-        secondary.innerHTML = this.cfSubs
-            .map(s => `<a class="sidebar2-item" href="${s.route}" data-prefix="${s.prefix}"><span>${s.emoji}</span> ${s.label}</a>`)
+        const cfHtml = this.cfSubs
+            .map(s => `<a class="sidebar2-item cf-sub" href="${s.route}" data-prefix="${s.prefix}"><span>${s.emoji}</span> ${s.label}</a>`)
             .join('');
+        const emailHtml = this.emailSubs
+            .map(s => {
+                if (s.external) {
+                    return `<a class="sidebar2-item email-sub" href="${s.href}" target="_blank" data-external><span>${s.emoji}</span> ${s.label}</a>`;
+                }
+                return `<a class="sidebar2-item email-sub" href="${s.route}" data-prefix="${s.prefix}"><span>${s.emoji}</span> ${s.label}</a>`;
+            })
+            .join('');
+        secondary.innerHTML = cfHtml + emailHtml;
     },
 
     update(path) {
@@ -259,12 +287,22 @@ const Sidebar = {
             btn.classList.toggle('active', path.startsWith(btn.dataset.prefix));
         });
 
-        // Show/hide secondary sidebar
         const sec = $('#sidebar-secondary');
         if (path.startsWith('/cf')) {
             sec.classList.remove('hidden');
-            $$('.sidebar2-item').forEach(item => {
+            $$('.cf-sub').forEach(el => el.style.display = '');
+            $$('.email-sub').forEach(el => el.style.display = 'none');
+            $$('.sidebar2-item.cf-sub').forEach(item => {
                 item.classList.toggle('active', path.startsWith(item.dataset.prefix));
+            });
+        } else if (path.startsWith('/email')) {
+            sec.classList.remove('hidden');
+            $$('.cf-sub').forEach(el => el.style.display = 'none');
+            $$('.email-sub').forEach(el => el.style.display = '');
+            $$('.sidebar2-item.email-sub').forEach(item => {
+                if (item.dataset.prefix) {
+                    item.classList.toggle('active', path.startsWith(item.dataset.prefix));
+                }
             });
         } else {
             sec.classList.add('hidden');
@@ -288,7 +326,7 @@ Router.register('/cf/zones/([^/]+)/?', (m) => Router.navigate(`/cf/zones/${m[1]}
 
 // Placeholder routes (apps.js registers /apps route itself)
 // /domains route registered by domains.js
-Router.register('/email', () => renderPlaceholder('✉️', 'Migadu', 'Email management via Migadu API — coming soon. Mailbox, alias, and identity management with automatic DNS provisioning.'));
+Router.register('/email/?', () => Router.navigate('/email/domains'));
 Router.register('/server', () => renderPlaceholder('🖥️', 'Server', 'Server console — coming soon. Web terminal, systemctl management, system stats, filesystem explorer.'));
 
 // ================================================================
