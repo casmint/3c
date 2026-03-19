@@ -224,30 +224,160 @@ def create_app(config: AppConfig) -> FastAPI:
     # Porkbun
     # ------------------------------------------------------------------
 
+    def _pb_error(e: Exception) -> JSONResponse:
+        if isinstance(e, httpx.HTTPStatusError):
+            detail = e.response.text
+            try:
+                body = e.response.json()
+                if body.get("message"):
+                    detail = body["message"]
+            except Exception:
+                pass
+            return JSONResponse(
+                status_code=e.response.status_code,
+                content={"error": detail, "detail": detail},
+            )
+        if isinstance(e, httpx.RequestError):
+            return JSONResponse(
+                status_code=502,
+                content={"error": "Failed to reach Porkbun API", "detail": str(e)},
+            )
+        return JSONResponse(
+            status_code=500,
+            content={"error": str(e), "detail": str(e)},
+        )
+
+    def _pb_guard() -> JSONResponse | None:
+        if not pb:
+            return JSONResponse(
+                status_code=400,
+                content={"error": "Porkbun API credentials not configured"},
+            )
+        return None
+
     @app.get("/api/porkbun/available")
     async def api_porkbun_available():
         return {"available": pb is not None}
 
     @app.post("/api/porkbun/ns/{domain}")
     async def api_update_nameservers(domain: str, request: Request):
-        if not pb:
-            return JSONResponse(
-                status_code=400,
-                content={"error": "Porkbun is not configured"},
-            )
+        guard = _pb_guard()
+        if guard:
+            return guard
         try:
             body = await request.json()
             return await pb.update_nameservers(domain, body["nameservers"])
-        except httpx.HTTPStatusError as e:
-            return JSONResponse(
-                status_code=e.response.status_code,
-                content={"error": "Porkbun API error", "detail": e.response.text},
-            )
         except Exception as e:
-            return JSONResponse(
-                status_code=500,
-                content={"error": str(e)},
+            return _pb_error(e)
+
+    @app.get("/api/domains")
+    async def api_list_domains():
+        """List all Porkbun domains with NS status and CF comparison."""
+        guard = _pb_guard()
+        if guard:
+            return guard
+        try:
+            import asyncio
+            domains, pricing = await asyncio.gather(
+                pb.list_domains(),
+                pb.get_pricing(),
             )
+
+            # Fetch all CF zones once
+            try:
+                cf_data = await cf.list_zones(per_page=50)
+                cf_zones = {z["name"]: z for z in cf_data.get("result", [])}
+            except Exception:
+                cf_zones = {}
+
+            # Fetch nameservers for each domain concurrently
+            async def enrich(d):
+                domain_name = d.get("domain", "")
+                try:
+                    ns = await pb.get_nameservers(domain_name)
+                except Exception:
+                    ns = []
+
+                # Determine TLD and pricing
+                tld = domain_name.split(".", 1)[1] if "." in domain_name else ""
+                tld_pricing = pricing.get(tld, {})
+                renewal_cost = tld_pricing.get("renewal") or tld_pricing.get("renew")
+
+                # CF status
+                cf_zone = cf_zones.get(domain_name)
+                if cf_zone:
+                    cf_ns = sorted(cf_zone.get("name_servers") or [])
+                    current_ns = sorted(ns)
+                    if current_ns == cf_ns:
+                        cf_status = "cf_active"
+                    else:
+                        cf_status = "cf_pending"
+                else:
+                    cf_ns = []
+                    cf_status = "not_on_cf"
+
+                return {
+                    "domain": domain_name,
+                    "tld": tld,
+                    "status": d.get("status", ""),
+                    "expire_date": d.get("expireDate", ""),
+                    "auto_renew": d.get("autoRenew", False),
+                    "not_local": d.get("notLocal", 0),
+                    "nameservers": ns,
+                    "cf_status": cf_status,
+                    "cf_nameservers": cf_ns,
+                    "renewal_cost": renewal_cost,
+                }
+
+            results = await asyncio.gather(
+                *[enrich(d) for d in domains],
+                return_exceptions=True,
+            )
+            # Filter out any failed enrichments
+            return {
+                "domains": [
+                    r for r in results if isinstance(r, dict)
+                ]
+            }
+        except Exception as e:
+            return _pb_error(e)
+
+    @app.post("/api/domains/{domain}/update-ns")
+    async def api_domain_update_ns(domain: str, request: Request):
+        """Update nameservers for a domain on Porkbun."""
+        guard = _pb_guard()
+        if guard:
+            return guard
+        try:
+            body = await request.json()
+            result = await pb.update_nameservers(domain, body["nameservers"])
+            return {"success": True, "result": result}
+        except Exception as e:
+            return _pb_error(e)
+
+    @app.post("/api/domains/{domain}/fix-cf")
+    async def api_domain_fix_cf(domain: str):
+        """Set CF-assigned nameservers on Porkbun for a domain."""
+        guard = _pb_guard()
+        if guard:
+            return guard
+        try:
+            zone = await cf.resolve_zone(domain)
+            if not zone:
+                return JSONResponse(
+                    status_code=404,
+                    content={"error": f"No Cloudflare zone found for {domain}"},
+                )
+            cf_ns = zone.get("name_servers", [])
+            if not cf_ns:
+                return JSONResponse(
+                    status_code=400,
+                    content={"error": "Cloudflare zone has no assigned nameservers"},
+                )
+            result = await pb.update_nameservers(domain, cf_ns)
+            return {"success": True, "nameservers": cf_ns, "result": result}
+        except Exception as e:
+            return _pb_error(e)
 
     # ------------------------------------------------------------------
     # Apps — registry

@@ -287,7 +287,7 @@ Router.register('/cf/zones/([^/]+)/?', (m) => Router.navigate(`/cf/zones/${m[1]}
 // Zones, DNS, Analytics, Redirects, Pages — see zones.js, dns.js, etc.
 
 // Placeholder routes (apps.js registers /apps route itself)
-Router.register('/domains', () => renderPlaceholder('🐷', 'Porkbun', 'Domain management via Porkbun API — coming soon. Will list all domains, nameservers, renewal dates and costs.'));
+// /domains route registered by domains.js
 Router.register('/email', () => renderPlaceholder('✉️', 'Migadu', 'Email management via Migadu API — coming soon. Mailbox, alias, and identity management with automatic DNS provisioning.'));
 Router.register('/server', () => renderPlaceholder('🖥️', 'Server', 'Server console — coming soon. Web terminal, systemctl management, system stats, filesystem explorer.'));
 
