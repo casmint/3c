@@ -1,6 +1,59 @@
 /* 3C Panel — Migadu email manager (/email) */
 
 // ================================================================
+// Shared: parse Migadu DNS response into normalized record array
+// ================================================================
+function parseMigaduDns(data) {
+    // Migadu returns a flat object: {spf: {}, dkim: [], mx_records: [], dmarc: {}, dns_verification: {}}
+    // Normalize into a flat array with category tags for the checklist.
+    const records = [];
+
+    function add(cat, obj) {
+        if (!obj) return;
+        records.push({
+            category: cat,
+            type: (obj.type || '').toUpperCase(),
+            name: obj.name || '@',
+            content: obj.value || obj.content || '',
+            priority: obj.priority != null ? Number(obj.priority) : null,
+        });
+    }
+
+    // Verification TXT
+    if (data.dns_verification) add('verification', data.dns_verification);
+
+    // MX records (array)
+    (data.mx_records || []).forEach(r => add('mx', r));
+
+    // DKIM keys (array)
+    (data.dkim || []).forEach(r => add('dkim', r));
+
+    // SPF (single object)
+    if (data.spf) add('spf', data.spf);
+
+    // DMARC (single object)
+    if (data.dmarc) add('dmarc', data.dmarc);
+
+    // Fallback: if none of the known keys exist, try entries/records array
+    if (!records.length) {
+        const entries = data.entries || data.records || [];
+        if (Array.isArray(entries)) {
+            entries.forEach(r => {
+                records.push({
+                    category: 'other',
+                    type: (r.type || '').toUpperCase(),
+                    name: r.name || '@',
+                    content: r.value || r.content || '',
+                    priority: r.priority != null ? Number(r.priority) : null,
+                });
+            });
+        }
+    }
+
+    return records;
+}
+
+// ================================================================
 // EmailDomains — domain list + add domain flow
 // ================================================================
 const EmailDomains = {
@@ -348,8 +401,8 @@ const EmailDomains = {
 
         function renderStep2() {
             setStep(2);
-            const entries = dnsRecords.entries || dnsRecords.records || [];
-            if (!entries.length) {
+            const allRecords = parseMigaduDns(dnsRecords);
+            if (!allRecords.length) {
                 body.innerHTML = `
                     <div class="info-message">No DNS records returned by Migadu for ${escapeHtml(selectedDomain)}. The domain may need manual configuration.</div>
                     <div class="btn-row mt-12">
@@ -358,56 +411,51 @@ const EmailDomains = {
                 return;
             }
 
-            // Categorize records into 5 groups
-            const categories = {
-                verification: { label: 'Verification Record', icon: '&#10003;', note: 'Links your Migadu account to this domain uniquely', required: true, records: [] },
-                mx:           { label: 'MX Records',          icon: '&#10003;', note: null, required: true, records: [] },
-                dkim:         { label: 'DKIM Public Keys',     icon: '&#10003;', note: 'All keys required for key rotation without failures', required: true, records: [] },
-                spf:          { label: 'SPF Policy',           icon: '&#10003;', note: null, required: true, records: [] },
-                dmarc:        { label: 'DMARC Policy',         icon: '&#9888;',  note: 'Easy to implement and highly effective — skipping not recommended', required: false, records: [] },
+            // Group into 5 categories for display
+            const catMeta = {
+                verification: { label: 'Verification Record', icon: '&#10003;', note: 'Links your Migadu account to this domain uniquely', required: true },
+                mx:           { label: 'MX Records',          icon: '&#10003;', note: null, required: true },
+                dkim:         { label: 'DKIM Public Keys',     icon: '&#10003;', note: 'All keys required for key rotation without failures', required: true },
+                spf:          { label: 'SPF Policy',           icon: '&#10003;', note: null, required: true },
+                dmarc:        { label: 'DMARC Policy',         icon: '&#9888;',  note: 'Easy to implement and highly effective — skipping not recommended', required: false },
+                other:        { label: 'Other Records',        icon: '&#10003;', note: null, required: true },
             };
 
-            entries.forEach((r, i) => {
-                const t = (r.type || '').toUpperCase();
-                const n = (r.name || '').toLowerCase();
-                const c = (r.content || '').toLowerCase();
-                r._idx = i;
-                if (t === 'MX') categories.mx.records.push(r);
-                else if (n.includes('_domainkey')) categories.dkim.records.push(r);
-                else if (n.includes('_dmarc') || c.includes('dmarc')) categories.dmarc.records.push(r);
-                else if (c.includes('spf')) categories.spf.records.push(r);
-                else categories.verification.records.push(r);
+            const grouped = {};
+            allRecords.forEach(r => {
+                if (!grouped[r.category]) grouped[r.category] = [];
+                grouped[r.category].push(r);
             });
 
             let checklist = '';
-            for (const [key, cat] of Object.entries(categories)) {
-                if (!cat.records.length) continue;
+            for (const [key, meta] of Object.entries(catMeta)) {
+                const recs = grouped[key];
+                if (!recs || !recs.length) continue;
                 const isDmarc = key === 'dmarc';
                 const iconCls = isDmarc ? 'check-pending' : 'check-ok';
-                const reqLabel = cat.required ? 'required' : 'recommended';
+                const reqLabel = meta.required ? 'required' : 'recommended';
 
                 checklist += `<li style="flex-direction:column;align-items:stretch">
                     <div style="display:flex;align-items:center;gap:8px">
                         <input type="checkbox" checked data-cat="${key}" id="dns-cat-${key}">
-                        <span class="check-icon ${iconCls}">${cat.icon}</span>
-                        <strong style="font-size:12px">${escapeHtml(cat.label)}</strong>
+                        <span class="check-icon ${iconCls}">${meta.icon}</span>
+                        <strong style="font-size:12px">${escapeHtml(meta.label)}</strong>
                         <span class="text-muted" style="font-size:10px">(${reqLabel})</span>
                     </div>
                     <div class="record-info" style="margin-left:52px;margin-top:4px">`;
 
-                cat.records.forEach(r => {
+                recs.forEach(r => {
                     const prio = r.priority != null ? ` ${r.priority}` : '';
-                    checklist += `<div><span class="record-type">${escapeHtml(r.type || '')}</span>${prio} ${escapeHtml(r.name || selectedDomain)} &rarr; ${escapeHtml(r.content || '')}</div>`;
+                    checklist += `<div><span class="record-type">${escapeHtml(r.type)}</span>${prio} ${escapeHtml(r.name)} &rarr; ${escapeHtml(r.content)}</div>`;
                 });
 
-                if (cat.note) {
-                    checklist += `<div class="${isDmarc ? 'text-danger' : 'text-muted'}" style="font-size:10px;margin-top:4px;font-style:italic">${escapeHtml(cat.note)}</div>`;
+                if (meta.note) {
+                    checklist += `<div class="${isDmarc ? 'text-danger' : 'text-muted'}" style="font-size:10px;margin-top:4px;font-style:italic">${escapeHtml(meta.note)}</div>`;
                 }
 
                 checklist += `</div></li>`;
             }
 
-            // Also include any uncategorized leftovers (shouldn't happen, but safe)
             body.innerHTML = `
                 <p class="text-muted" style="font-size:12px">DNS records to add to Cloudflare for <strong>${escapeHtml(selectedDomain)}</strong>:</p>
                 <ul class="dns-checklist">${checklist}</ul>
@@ -417,7 +465,6 @@ const EmailDomains = {
                     <button class="btn btn-accent" id="setup-dns-btn">Add to Cloudflare</button>
                 </div>`;
 
-            // Warn on DMARC uncheck
             overlay.querySelector('#dns-cat-dmarc')?.addEventListener('change', (e) => {
                 const msg = overlay.querySelector('#add-domain-msg');
                 if (!e.target.checked) {
@@ -625,16 +672,16 @@ const EmailDNS = {
                 API.get(`/api/email/domains/${encodeURIComponent(domain)}/diagnostics`).catch(() => null),
             ]);
 
-            const entries = dnsData.entries || dnsData.records || [];
+            const allRecords = parseMigaduDns(dnsData);
             let html = '';
 
-            if (entries.length) {
-                const rows = entries.map(r => {
+            if (allRecords.length) {
+                const rows = allRecords.map(r => {
                     const prio = r.priority != null ? r.priority : '';
                     return `<tr>
-                        <td><span class="badge badge-free">${escapeHtml(r.type || '')}</span></td>
-                        <td class="mono" style="font-size:11px">${escapeHtml(r.name || domain)}</td>
-                        <td class="mono truncate" style="font-size:11px;max-width:300px" title="${escapeHtml(r.content || '')}">${escapeHtml(r.content || '')}</td>
+                        <td><span class="badge badge-free">${escapeHtml(r.type)}</span></td>
+                        <td class="mono" style="font-size:11px">${escapeHtml(r.name)}</td>
+                        <td class="mono truncate" style="font-size:11px;max-width:300px" title="${escapeHtml(r.content)}">${escapeHtml(r.content)}</td>
                         <td>${prio}</td>
                     </tr>`;
                 }).join('');
@@ -695,8 +742,36 @@ const EmailDNS = {
     },
 
     renderDiagnostics(diag) {
-        // Migadu diagnostics response varies — handle common shapes
-        const checks = diag.checks || diag.diagnostics || [];
+        // Migadu returns: {status: "ok"|"error", checks: {verify: "ok", mx: "error", ...}}
+        const checks = diag.checks || diag.diagnostics;
+
+        // Case 1: checks is an object with string values (Migadu's actual format)
+        if (checks && typeof checks === 'object' && !Array.isArray(checks)) {
+            const labels = {
+                verify: 'Verification TXT',
+                nameservers: 'Nameservers',
+                mx: 'MX Records',
+                spf: 'SPF Policy',
+                dkim: 'DKIM Keys',
+                dmarc: 'DMARC Policy',
+            };
+            const items = Object.entries(checks).map(([k, v]) => {
+                const isOk = v === 'ok' || v === 'passed' || v === true;
+                const isWarn = v === 'warning';
+                const cls = isOk ? 'diag-ok' : isWarn ? 'diag-warn' : 'diag-fail';
+                const icon = isOk ? '&#10003;' : isWarn ? '&#9888;' : '&#10007;';
+                const label = labels[k] || k;
+                const status = isOk ? 'OK' : isWarn ? 'Warning' : String(v);
+                return `<li><span class="${cls}">${icon}</span> <strong>${escapeHtml(label)}</strong> — ${escapeHtml(status)}</li>`;
+            }).join('');
+
+            const overall = diag.status || '';
+            const overallCls = overall === 'ok' ? 'text-success' : 'text-danger';
+            const header = overall ? `<div class="${overallCls}" style="font-size:12px;margin-bottom:8px;font-weight:600">Overall: ${escapeHtml(overall)}</div>` : '';
+            return `${header}<ul class="diag-list">${items}</ul>`;
+        }
+
+        // Case 2: checks is an array of objects
         if (Array.isArray(checks) && checks.length) {
             const items = checks.map(c => {
                 const ok = c.passed || c.ok || c.status === 'ok';
@@ -708,16 +783,15 @@ const EmailDNS = {
             return `<ul class="diag-list">${items}</ul>`;
         }
 
-        // Fallback: render as key-value pairs
-        const keys = Object.keys(diag).filter(k => k !== 'domain');
+        // Case 3: flat key-value pairs
+        const keys = Object.keys(diag).filter(k => k !== 'domain' && k !== 'domain_name');
         if (keys.length) {
             const items = keys.map(k => {
                 const val = diag[k];
                 const isOk = val === true || val === 'ok' || val === 'passed';
                 const cls = isOk ? 'diag-ok' : 'diag-fail';
                 const icon = isOk ? '&#10003;' : '&#10007;';
-                const display = typeof val === 'object' ? JSON.stringify(val) : String(val);
-                return `<li><span class="${cls}">${icon}</span> <strong>${escapeHtml(k)}</strong>: ${escapeHtml(display)}</li>`;
+                return `<li><span class="${cls}">${icon}</span> <strong>${escapeHtml(k)}</strong>: ${escapeHtml(String(val))}</li>`;
             }).join('');
             return `<ul class="diag-list">${items}</ul>`;
         }

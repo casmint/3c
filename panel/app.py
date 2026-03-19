@@ -555,18 +555,42 @@ def create_app(config: AppConfig) -> FastAPI:
             zone_id = zone["id"]
 
             # 3. Map Migadu records to CF format
+            # Migadu returns: {spf: {}, dkim: [], mx_records: [], dmarc: {},
+            #                  dns_verification: {}, domain_name: "..."}
             cf_records = []
-            for entry in dns_data.get("entries", []):
+
+            def _add(entry):
+                if not entry:
+                    return
                 rec = {
-                    "type": entry.get("type", ""),
-                    "name": entry.get("name", domain),
-                    "content": entry.get("content", ""),
+                    "type": (entry.get("type") or "").upper(),
+                    "name": entry.get("name") or domain,
+                    "content": entry.get("value") or entry.get("content") or "",
                     "ttl": 1,
                     "proxied": False,
                 }
                 if entry.get("priority") is not None:
                     rec["priority"] = int(entry["priority"])
-                cf_records.append(rec)
+                if rec["content"]:
+                    cf_records.append(rec)
+
+            # Verification TXT
+            _add(dns_data.get("dns_verification"))
+            # MX records
+            for mx in dns_data.get("mx_records") or []:
+                _add(mx)
+            # DKIM CNAMEs
+            for dk in dns_data.get("dkim") or []:
+                _add(dk)
+            # SPF TXT
+            _add(dns_data.get("spf"))
+            # DMARC TXT
+            _add(dns_data.get("dmarc"))
+
+            # Fallback: legacy array format
+            if not cf_records:
+                for entry in dns_data.get("entries") or dns_data.get("records") or []:
+                    _add(entry)
 
             # 4. Create all records via the batch function
             result = await cf.add_dns_records(zone_id, cf_records)
