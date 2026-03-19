@@ -72,6 +72,58 @@ def create_app(config: AppConfig) -> FastAPI:
     async def api_config_status():
         return {"cloudflare": True, "porkbun": pb is not None, "migadu": mg is not None}
 
+    @app.get("/api/settings/status")
+    async def api_settings_status():
+        """Quick connectivity check for all integrations."""
+        status = {"cloudflare": False, "porkbun": False, "migadu": False}
+        try:
+            await cf.list_zones(per_page=1)
+            status["cloudflare"] = True
+        except Exception:
+            pass
+        if pb:
+            try:
+                await pb.list_domains()
+                status["porkbun"] = True
+            except Exception:
+                pass
+        if mg:
+            try:
+                await mg.list_domains()
+                status["migadu"] = True
+            except Exception:
+                pass
+        return status
+
+    @app.post("/api/settings/test/{service}")
+    async def api_settings_test(service: str):
+        """Test a specific integration and return detailed result."""
+        if service == "cloudflare":
+            try:
+                data = await cf.list_zones(per_page=1)
+                count = data.get("result_info", {}).get("total_count", "?")
+                return {"success": True, "message": f"Connected — {count} zones"}
+            except Exception as e:
+                return {"success": False, "message": str(e)}
+        elif service == "porkbun":
+            if not pb:
+                return {"success": False, "message": "Not configured"}
+            try:
+                domains = await pb.list_domains()
+                return {"success": True, "message": f"Connected — {len(domains)} domains"}
+            except Exception as e:
+                return {"success": False, "message": str(e)}
+        elif service == "migadu":
+            if not mg:
+                return {"success": False, "message": "Not configured"}
+            try:
+                data = await mg.list_domains()
+                domains = data if isinstance(data, list) else (data.get("domains") or [])
+                return {"success": True, "message": f"Connected — {len(domains)} domains"}
+            except Exception as e:
+                return {"success": False, "message": str(e)}
+        return JSONResponse(status_code=404, content={"error": f"Unknown service: {service}"})
+
     # ------------------------------------------------------------------
     # Zones
     # ------------------------------------------------------------------

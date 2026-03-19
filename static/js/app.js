@@ -1,6 +1,16 @@
 /* 3C Panel — SPA core: router, sidebars, shared utilities */
 
 // ================================================================
+// Theme — apply before anything renders to prevent flash
+// ================================================================
+(function() {
+    const theme = localStorage.getItem('3c-theme') || 'dark';
+    const accent = localStorage.getItem('3c-accent');
+    if (theme === 'light') document.documentElement.classList.add('theme-light');
+    if (accent) document.documentElement.style.setProperty('--accent', accent);
+})();
+
+// ================================================================
 // API helper
 // ================================================================
 const API = {
@@ -281,13 +291,16 @@ const Sidebar = {
 
     render() {
         const primary = $('#sidebar-primary');
-        primary.innerHTML = this.sections
+        const navBtns = this.sections
             .map(s => `<button class="sidebar-btn" data-route="${s.route}" data-prefix="${s.prefix}" data-tooltip="${s.label}">${s.emoji}</button>`)
             .join('');
+        primary.innerHTML = navBtns +
+            '<div class="sidebar-spacer"></div>' +
+            '<button class="sidebar-gear" data-route="/settings" data-tooltip="Settings">\u2699\uFE0F</button>';
 
         primary.addEventListener('click', (e) => {
-            const btn = e.target.closest('.sidebar-btn');
-            if (btn) Router.navigate(btn.dataset.route);
+            const btn = e.target.closest('.sidebar-btn') || e.target.closest('.sidebar-gear');
+            if (btn && btn.dataset.route) Router.navigate(btn.dataset.route);
         });
 
         const secondary = $('#sidebar-secondary');
@@ -310,6 +323,9 @@ const Sidebar = {
         $$('.sidebar-btn').forEach(btn => {
             btn.classList.toggle('active', path.startsWith(btn.dataset.prefix));
         });
+        // Gear button active state
+        const gear = $('.sidebar-gear');
+        if (gear) gear.classList.toggle('active', path.startsWith('/settings'));
 
         const sec = $('#sidebar-secondary');
         if (path.startsWith('/cf')) {
