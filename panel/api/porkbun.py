@@ -1,6 +1,10 @@
 """Porkbun API client — domain listing, nameservers, pricing."""
 
+import logging
+
 import httpx
+
+logger = logging.getLogger(__name__)
 
 
 class PorkbunAPI:
@@ -24,15 +28,26 @@ class PorkbunAPI:
         data = resp.json()
         return data.get("domains", [])
 
-    async def get_nameservers(self, domain: str) -> list:
-        """Get current nameservers for a domain."""
-        resp = await self.client.post(
-            f"{self.BASE_URL}/domain/getNs/{domain}",
-            json=self._auth(),
-        )
-        resp.raise_for_status()
-        data = resp.json()
-        return data.get("ns", [])
+    async def get_nameservers(self, domain: str) -> dict:
+        """Get current nameservers for a domain.
+
+        Returns {"ns": [...], "error": None} on success,
+        or {"ns": [], "error": "message"} on failure.
+        """
+        try:
+            resp = await self.client.post(
+                f"{self.BASE_URL}/domain/getNs/{domain}",
+                json=self._auth(),
+            )
+            data = resp.json()
+            if resp.status_code != 200 or data.get("status") == "ERROR":
+                msg = data.get("message", f"HTTP {resp.status_code}")
+                logger.warning("getNs failed for %s: %s", domain, msg)
+                return {"ns": [], "error": msg}
+            return {"ns": data.get("ns", []), "error": None}
+        except Exception as e:
+            logger.error("getNs exception for %s: %s", domain, e)
+            return {"ns": [], "error": str(e)}
 
     async def update_nameservers(
         self, domain: str, nameservers: list[str]

@@ -293,10 +293,9 @@ def create_app(config: AppConfig) -> FastAPI:
             # Fetch nameservers for each domain concurrently
             async def enrich(d):
                 domain_name = d.get("domain", "")
-                try:
-                    ns = await pb.get_nameservers(domain_name)
-                except Exception:
-                    ns = []
+                ns_result = await pb.get_nameservers(domain_name)
+                ns = ns_result["ns"]
+                ns_error = ns_result["error"]
 
                 # Determine TLD and pricing
                 tld = domain_name.split(".", 1)[1] if "." in domain_name else ""
@@ -324,6 +323,7 @@ def create_app(config: AppConfig) -> FastAPI:
                     "auto_renew": d.get("autoRenew", False),
                     "not_local": d.get("notLocal", 0),
                     "nameservers": ns,
+                    "ns_error": ns_error,
                     "cf_status": cf_status,
                     "cf_nameservers": cf_ns,
                     "renewal_cost": renewal_cost,

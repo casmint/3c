@@ -78,7 +78,10 @@ const Domains = {
 
         const rows = domains.map(d => {
             const statusBadge = this.statusBadge(d.cf_status);
-            const nsDisplay = (d.nameservers || []).join(', ') || '—';
+            const nsDisplay = d.ns_error
+                ? `Error: ${d.ns_error}`
+                : (d.nameservers || []).join(', ') || '—';
+            const nsClass = d.ns_error ? 'text-danger' : 'text-muted';
             const expiry = this.formatExpiry(d.expire_date);
             const cost = d.renewal_cost ? `$${parseFloat(d.renewal_cost).toFixed(2)}/yr` : '—';
 
@@ -94,7 +97,7 @@ const Domains = {
                 <td><strong>${escapeHtml(d.domain)}</strong></td>
                 <td><span class="text-muted">.${escapeHtml(d.tld)}</span></td>
                 <td>${statusBadge}</td>
-                <td class="text-muted mono" style="font-size:11px" title="${escapeHtml(nsDisplay)}">${escapeHtml(this.truncateNs(nsDisplay))}</td>
+                <td class="${nsClass} mono" style="font-size:11px" title="${escapeHtml(nsDisplay)}">${escapeHtml(this.truncateNs(nsDisplay))}</td>
                 <td class="${expiry.warn ? 'text-danger' : ''}">${expiry.text}</td>
                 <td>${cost}</td>
                 <td class="actions">${actions.join(' ')}</td>
