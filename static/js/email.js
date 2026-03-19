@@ -80,12 +80,13 @@ const EmailDomains = {
             this.domains = Array.isArray(data) ? data : (data.domains || []);
             this.renderTable();
         } catch (err) {
-            container.innerHTML = `<div class="error-message">${escapeHtml(err.message)}</div>`;
+            if (container) container.innerHTML = `<div class="error-message">${escapeHtml(err.message)}</div>`;
         }
     },
 
     renderTable() {
         const container = $('#email-domains-container');
+        if (!container) return;
         if (!this.domains.length) {
             container.innerHTML = '<div class="info-message">No email domains configured. Add one to get started.</div>';
             return;
@@ -191,7 +192,8 @@ const EmailDomains = {
                 }
             });
         } catch (err) {
-            $('#email-domain-detail').innerHTML = `<div class="error-message">${escapeHtml(err.message)}</div>`;
+            const det = $('#email-domain-detail');
+            if (det) det.innerHTML = `<div class="error-message">${escapeHtml(err.message)}</div>`;
         }
     },
 
@@ -666,12 +668,14 @@ const EmailDNS = {
             <div id="email-dns-container"><div class="loading">Loading DNS records...</div></div>`;
 
         const container = $('#email-dns-container');
+        if (!container) return;
         try {
             const [dnsData, diagData] = await Promise.all([
                 API.get(`/api/email/domains/${encodeURIComponent(domain)}/dns-records`),
                 API.get(`/api/email/domains/${encodeURIComponent(domain)}/diagnostics`).catch(() => null),
             ]);
 
+            if (!document.getElementById('email-dns-container')) return; // navigated away
             const allRecords = parseMigaduDns(dnsData);
             let html = '';
 
@@ -737,7 +741,7 @@ const EmailDNS = {
                 }
             });
         } catch (err) {
-            container.innerHTML = `<div class="error-message">${escapeHtml(err.message)}</div>`;
+            if (container && container.isConnected) container.innerHTML = `<div class="error-message">${escapeHtml(err.message)}</div>`;
         }
     },
 
@@ -826,14 +830,16 @@ const Mailboxes = {
             const data = await API.get('/api/email/domains');
             this.domains = Array.isArray(data) ? data : (data.domains || []);
         } catch (err) {
-            $('#mailboxes-container').innerHTML = `<div class="error-message">${escapeHtml(err.message)}</div>`;
+            const mc = $('#mailboxes-container');
+            if (mc) mc.innerHTML = `<div class="error-message">${escapeHtml(err.message)}</div>`;
             return;
         }
 
         const sel = $('#email-domain-select');
         if (!this.domains.length) {
-            sel.innerHTML = '<option value="">No email domains</option>';
-            $('#mailboxes-container').innerHTML = '<div class="info-message">No email domains configured. Add one first.</div>';
+            if (sel) sel.innerHTML = '<option value="">No email domains</option>';
+            const mc = $('#mailboxes-container');
+            if (mc) mc.innerHTML = '<div class="info-message">No email domains configured. Add one first.</div>';
             return;
         }
 
@@ -872,18 +878,20 @@ const Mailboxes = {
     async loadMailboxes() {
         if (!this.currentDomain) return;
         const container = $('#mailboxes-container');
+        if (!container) return;
         container.innerHTML = '<div class="loading">Loading mailboxes...</div>';
         try {
             const data = await API.get(`/api/email/mailboxes/${encodeURIComponent(this.currentDomain)}`);
             this.mailboxes = Array.isArray(data) ? data : (data.mailboxes || []);
             this.renderTable();
         } catch (err) {
-            container.innerHTML = `<div class="error-message">${escapeHtml(err.message)}</div>`;
+            if (container.isConnected) container.innerHTML = `<div class="error-message">${escapeHtml(err.message)}</div>`;
         }
     },
 
     renderTable() {
         const container = $('#mailboxes-container');
+        if (!container) return;
         if (!this.mailboxes.length) {
             container.innerHTML = '<div class="info-message">No mailboxes for this domain.</div>';
             return;
