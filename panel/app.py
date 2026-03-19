@@ -1,10 +1,11 @@
 """FastAPI application — REST API, static file serving, SPA catch-all."""
 
+import time
 from pathlib import Path
 
 import httpx
 from fastapi import FastAPI, Request
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from panel.api.cloudflare import CloudflareAPI
@@ -13,6 +14,7 @@ from panel.api.porkbun import PorkbunAPI
 from panel.config import AppConfig
 
 STATIC_DIR = Path(__file__).resolve().parent.parent / "static"
+CACHE_BUST = str(int(time.time()))
 
 
 def create_app(config: AppConfig) -> FastAPI:
@@ -785,12 +787,19 @@ def create_app(config: AppConfig) -> FastAPI:
 
     app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 
+    _index_html = (STATIC_DIR / "index.html").read_text().replace(
+        "__CACHE_BUST__", CACHE_BUST
+    )
+
+    def _serve_index():
+        return HTMLResponse(_index_html)
+
     @app.get("/")
     async def root():
-        return FileResponse(str(STATIC_DIR / "index.html"))
+        return _serve_index()
 
     @app.get("/{full_path:path}")
     async def spa_catch_all(full_path: str):
-        return FileResponse(str(STATIC_DIR / "index.html"))
+        return _serve_index()
 
     return app
