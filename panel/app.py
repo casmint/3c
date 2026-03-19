@@ -30,9 +30,21 @@ def create_app(config: AppConfig) -> FastAPI:
 
     def _cf_error(e: Exception) -> JSONResponse:
         if isinstance(e, httpx.HTTPStatusError):
+            detail = e.response.text
+            try:
+                body = e.response.json()
+                cf_errors = body.get("errors", [])
+                if cf_errors:
+                    detail = "; ".join(
+                        err.get("message", "")
+                        for err in cf_errors
+                        if err.get("message")
+                    ) or detail
+            except Exception:
+                pass
             return JSONResponse(
                 status_code=e.response.status_code,
-                content={"error": f"Cloudflare API error", "detail": e.response.text},
+                content={"error": detail, "detail": detail},
             )
         if isinstance(e, httpx.RequestError):
             return JSONResponse(
