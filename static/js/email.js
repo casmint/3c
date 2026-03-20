@@ -495,6 +495,7 @@ const EmailDomains = {
             try {
                 const result = await API.post(`/api/email/domains/${encodeURIComponent(selectedDomain)}/setup-dns`);
                 const created = result.created || [];
+                const skipped = result.skipped || [];
                 const failed = result.failed || [];
 
                 let html = '<ul class="dns-checklist">';
@@ -504,6 +505,16 @@ const EmailDomains = {
                         <span class="check-icon check-ok">&#10003;</span>
                         <div class="record-info">
                             <span class="record-type">${escapeHtml(rec.type || '')}</span> ${escapeHtml(rec.name || '')} &rarr; ${escapeHtml(rec.content || '')}
+                        </div>
+                    </li>`;
+                });
+                skipped.forEach(s => {
+                    const rec = s.record || {};
+                    html += `<li>
+                        <span class="check-icon check-ok" style="color:var(--text-muted)">&#8212;</span>
+                        <div class="record-info">
+                            <span class="record-type">${escapeHtml(rec.type || '')}</span> ${escapeHtml(rec.name || '')} &rarr; ${escapeHtml(rec.content || '')}
+                            <span class="text-muted" style="font-size:10px;margin-left:6px">${escapeHtml(s.message || 'Already exists')}</span>
                         </div>
                     </li>`;
                 });
@@ -519,9 +530,13 @@ const EmailDomains = {
                 });
                 html += '</ul>';
 
+                const parts = [];
+                if (created.length) parts.push(`${created.length} created`);
+                if (skipped.length) parts.push(`${skipped.length} already exist`);
+                if (failed.length) parts.push(`${failed.length} failed`);
                 const summary = failed.length
-                    ? `<div class="error-message">${created.length} created, ${failed.length} failed</div>`
-                    : `<div class="success-message">All ${created.length} records created successfully.</div>`;
+                    ? `<div class="error-message">${parts.join(', ')}</div>`
+                    : `<div class="success-message">${parts.join(', ') || 'Done'}</div>`;
 
                 body.innerHTML = `
                     ${summary}
@@ -719,11 +734,17 @@ const EmailDNS = {
                 try {
                     const result = await API.post(`/api/email/domains/${encodeURIComponent(domain)}/setup-dns`);
                     const created = result.created || [];
+                    const skipped = result.skipped || [];
                     const failed = result.failed || [];
+                    const parts = [];
+                    if (created.length) parts.push(`${created.length} created`);
+                    if (skipped.length) parts.push(`${skipped.length} already exist`);
+                    if (failed.length) parts.push(`${failed.length} failed`);
                     if (failed.length) {
-                        msg.innerHTML = `<div class="error-message">${created.length} created, ${failed.length} failed. ${failed.map(f => escapeHtml(f.error || '')).join('; ')}</div>`;
+                        const errors = failed.map(f => escapeHtml(f.error || '')).join('; ');
+                        msg.innerHTML = `<div class="error-message">${parts.join(', ')}. ${errors}</div>`;
                     } else {
-                        msg.innerHTML = `<div class="success-message">All ${created.length} records created.</div>`;
+                        msg.innerHTML = `<div class="success-message">${parts.join(', ') || 'Done'}.</div>`;
                     }
                 } catch (e) {
                     msg.innerHTML = `<div class="error-message">${escapeHtml(e.message)}</div>`;

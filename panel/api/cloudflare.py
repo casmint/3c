@@ -122,6 +122,7 @@ class CloudflareAPI:
             }
         """
         created = []
+        skipped = []
         failed = []
 
         for record in records:
@@ -129,17 +130,32 @@ class CloudflareAPI:
                 result = await self.create_dns_record(zone_id, record)
                 created.append(result.get("result", result))
             except httpx.HTTPStatusError as e:
-                failed.append({
-                    "record": record,
-                    "error": e.response.text,
-                })
+                # Parse CF error to get human-readable message
+                error_msg = str(e)
+                is_duplicate = False
+                try:
+                    body = e.response.json()
+                    cf_errors = body.get("errors", [])
+                    if cf_errors:
+                        error_msg = cf_errors[0].get("message", error_msg)
+                        # 81058 = identical record, 81053 = conflicting record
+                        is_duplicate = any(
+                            err.get("code") in (81058, 81057)
+                            for err in cf_errors
+                        )
+                except Exception:
+                    pass
+                if is_duplicate:
+                    skipped.append({"record": record, "message": "Already exists"})
+                else:
+                    failed.append({"record": record, "error": error_msg})
             except Exception as e:
                 failed.append({
                     "record": record,
                     "error": str(e),
                 })
 
-        return {"created": created, "failed": failed}
+        return {"created": created, "skipped": skipped, "failed": failed}
 
     # ------------------------------------------------------------------
     # Analytics (GraphQL)
