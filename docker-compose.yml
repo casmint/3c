@@ -32,6 +32,7 @@ services:
       - /usr/libexec/docker/cli-plugins:/usr/libexec/docker/cli-plugins:ro
       - ~/.config/3c/config.toml:/root/.config/3c/config.toml:ro
       - ./apps.json:/app/apps.json
+      - ./notes.json:/app/notes.json
       - ./apps:/app/apps
       - ./.env:/app/.env:ro
     environment:
