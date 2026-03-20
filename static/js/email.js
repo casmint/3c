@@ -129,7 +129,7 @@ const EmailDomains = {
         }).join('');
 
         container.innerHTML = `
-            <p class="text-muted" style="font-size:11px;margin-bottom:12px">Domain deletion is not available via API — use the Migadu admin panel to delete domains.</p>
+            <p class="text-muted" style="font-size:11px;margin-bottom:12px">Domain deletion is not available via API — use the <a href="https://admin.migadu.com/domains" target="_blank" rel="noopener" style="color:var(--accent)">Migadu admin panel</a> to delete domains.</p>
             <table class="data-table">
                 <thead><tr>
                     <th>Domain</th><th>Status</th><th>Send / Receive</th><th>Actions</th>
