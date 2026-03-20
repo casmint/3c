@@ -195,8 +195,10 @@ const Zones = {
 
                 msg.innerHTML = `<div class="success-message">Zone created! Nameservers: ${ns.join(', ')}</div>`;
 
-                // Offer to update NS on Porkbun if available
-                if (usePorkbun) {
+                // Offer to update NS on Porkbun if domain is on Porkbun
+                const allPbDomains = usePorkbun ? (await DomainCache.get()).map(d => d.domain) : [];
+                const isOnPorkbun = usePorkbun && allPbDomains.includes(name);
+                if (isOnPorkbun) {
                     result.classList.remove('hidden');
                     result.innerHTML = `
                         <div class="mt-16">
