@@ -284,8 +284,8 @@ const Pages = {
             <button class="modal-close">&times;</button>
             <h2>Note: ${escapeHtml(projectName)}</h2>
             <div class="form-group">
-                <label>Custom note</label>
-                <textarea class="form-input" id="note-input" rows="3" placeholder="What does this project do?">${escapeHtml(current)}</textarea>
+                <label>Custom note <span class="text-muted" style="font-size:10px;font-weight:normal">(Enter to save)</span></label>
+                <input type="text" class="form-input" id="note-input" placeholder="What does this project do?" value="${escapeHtml(current)}">
             </div>
             <div id="note-msg"></div>
             <div class="btn-row">
@@ -293,7 +293,7 @@ const Pages = {
                 <button class="btn btn-accent" id="note-save">Save</button>
             </div>`);
 
-        overlay.querySelector('#note-save').addEventListener('click', async () => {
+        const saveNote = async () => {
             const val = overlay.querySelector('#note-input').value.trim();
             const msg = overlay.querySelector('#note-msg');
             try {
@@ -304,7 +304,13 @@ const Pages = {
             } catch (e) {
                 msg.innerHTML = `<div class="error-message">${escapeHtml(e.message)}</div>`;
             }
+        };
+
+        overlay.querySelector('#note-input').addEventListener('keydown', (e) => {
+            if (e.key === 'Enter') { e.preventDefault(); saveNote(); }
         });
+
+        overlay.querySelector('#note-save').addEventListener('click', saveNote);
 
         overlay.querySelector('#note-del')?.addEventListener('click', async () => {
             try {
