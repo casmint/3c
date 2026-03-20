@@ -370,13 +370,8 @@ class CloudflareAPI:
         resp.raise_for_status()
         data = resp.json()
         results = data.get("result") or []
-
-        # Log result_info so we can see if CF is truncating
-        import logging
         info = data.get("result_info")
-        logging.getLogger("cloudflare.pages").info(
-            "Fetched %d pages projects, result_info=%s", len(results), info
-        )
+        print(f"[PAGES DEBUG] fetched={len(results)} result_info={info}", flush=True)
         return data
 
     async def create_pages_project(
