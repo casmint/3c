@@ -402,9 +402,17 @@ const Pages = {
                 <div style="margin-top:10px">
                     <button class="btn btn-sm btn-accent" id="add-domain-btn">+ Add Custom Domain</button>
                 </div>
-                <div id="add-domain-form" class="hidden" style="margin-top:10px">
+                <div id="add-domain-form" class="hidden" style="margin-top:10px;max-width:420px">
                     <div style="display:flex;gap:8px;align-items:center">
-                        <input type="text" class="form-input" id="custom-domain-input" placeholder="www.example.com" style="flex:1">
+                        <div style="position:relative;flex:1">
+                            <input type="text" class="form-input" id="custom-domain-input" placeholder="Type or select a zone..." autocomplete="off">
+                            <div id="domain-suggestions" style="
+                                display:none;position:absolute;top:100%;left:0;right:0;z-index:10;
+                                max-height:180px;overflow-y:auto;
+                                background:var(--bg-tertiary);border:1px solid var(--border);border-top:none;
+                                font-size:12px;font-family:var(--font-mono);
+                            "></div>
+                        </div>
                         <button class="btn btn-sm btn-accent" id="custom-domain-save">Add</button>
                     </div>
                     <div id="custom-domain-msg" class="mt-8"></div>
@@ -424,9 +432,55 @@ const Pages = {
             container.querySelector('#add-domain-form').classList.toggle('hidden');
         });
 
+        // Searchable zone dropdown for custom domain input
+        const domInput = container.querySelector('#custom-domain-input');
+        const sugBox = container.querySelector('#domain-suggestions');
+        let zones = [];
+
+        // Load zones in background
+        ZoneCache.get().then(z => { zones = z; }).catch(() => {});
+
+        function showDomainSuggestions(query) {
+            if (!zones.length) { sugBox.style.display = 'none'; return; }
+            const q = query.toLowerCase();
+            const matches = q
+                ? zones.filter(z => z.name.includes(q))
+                : zones.slice(0, 15);
+            if (!matches.length) { sugBox.style.display = 'none'; return; }
+            sugBox.innerHTML = matches.slice(0, 20).map(z =>
+                `<div style="padding:6px 10px;cursor:pointer;border-bottom:1px solid var(--border)" data-zone="${escapeHtml(z.name)}">${escapeHtml(z.name)}</div>`
+            ).join('');
+            sugBox.style.display = 'block';
+        }
+
+        domInput.addEventListener('input', () => showDomainSuggestions(domInput.value.trim()));
+        domInput.addEventListener('focus', () => { if (!domInput.value.trim()) showDomainSuggestions(''); });
+
+        sugBox.addEventListener('click', (e) => {
+            const item = e.target.closest('[data-zone]');
+            if (item) {
+                domInput.value = item.dataset.zone;
+                sugBox.style.display = 'none';
+            }
+        });
+
+        sugBox.addEventListener('mouseover', (e) => {
+            const item = e.target.closest('[data-zone]');
+            if (item) {
+                sugBox.querySelectorAll('[data-zone]').forEach(el => el.style.background = '');
+                item.style.background = 'var(--bg-secondary)';
+            }
+        });
+
+        container.addEventListener('click', (e) => {
+            if (!e.target.closest('#custom-domain-input') && !e.target.closest('#domain-suggestions')) {
+                sugBox.style.display = 'none';
+            }
+        });
+
         // Save custom domain — create CNAME record pointing to pages.dev subdomain
         container.querySelector('#custom-domain-save')?.addEventListener('click', async () => {
-            const domain = container.querySelector('#custom-domain-input').value.trim();
+            const domain = domInput.value.trim();
             const msg = container.querySelector('#custom-domain-msg');
             if (!domain) { msg.innerHTML = '<div class="error-message">Enter a domain</div>'; return; }
 
