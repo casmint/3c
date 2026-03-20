@@ -636,8 +636,14 @@ def create_app(config: AppConfig) -> FastAPI:
                 if rec["content"]:
                     cf_records.append(rec)
 
-            # Verification TXT
-            _add(dns_data.get("dns_verification"))
+            # Verification TXT — Migadu API returns just the token,
+            # but the actual TXT record needs "hosted-email-verify=" prefix
+            verify = dns_data.get("dns_verification")
+            if verify:
+                val = verify.get("value") or verify.get("content") or ""
+                if val and not val.startswith("hosted-email-verify="):
+                    verify = {**verify, "value": f"hosted-email-verify={val}"}
+                _add(verify)
             # MX records
             for mx in dns_data.get("mx_records") or []:
                 _add(mx)

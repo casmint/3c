@@ -159,29 +159,61 @@ class CloudflareAPI:
         match. For TXT records where there may be multiple (SPF, verification,
         DMARC), matches on content prefix to find the right one to replace.
         """
+        import logging
+        log = logging.getLogger("cloudflare")
+
         rec_type = record.get("type", "").upper()
-        rec_name = record.get("name", "")
+        rec_name = record.get("name", "").rstrip(".")
         rec_content = record.get("content", "")
 
+        def _names_match(cf_name: str, our_name: str) -> bool:
+            """Compare DNS names: CF returns FQDNs, we may send short names.
+
+            e.g. cf_name='key1._domainkey.3c.lol' matches our_name='key1._domainkey'
+            """
+            cf = cf_name.rstrip(".")
+            ours = our_name.rstrip(".")
+            return cf == ours or cf.startswith(ours + ".")
+
         try:
+            # First try same record type
             existing = await self.list_dns_records(zone_id, record_type=rec_type)
             candidates = [
                 r for r in existing.get("result", [])
-                if r.get("name", "").rstrip(".") == rec_name.rstrip(".")
-                or r.get("name", "") == rec_name
+                if _names_match(r.get("name", ""), rec_name)
             ]
 
             if not candidates:
-                # No type match — check if a CNAME is blocking
+                # For TXT/MX, a CNAME at the same name blocks creation
                 if rec_type in ("TXT", "MX"):
-                    cname_data = await self.list_dns_records(zone_id, record_type="CNAME")
+                    cname_data = await self.list_dns_records(
+                        zone_id, record_type="CNAME"
+                    )
                     candidates = [
                         r for r in cname_data.get("result", [])
-                        if r.get("name", "").rstrip(".") == rec_name.rstrip(".")
+                        if _names_match(r.get("name", ""), rec_name)
                     ]
+                # For CNAME, an A/AAAA at the same name blocks creation
+                elif rec_type == "CNAME":
+                    for check_type in ("A", "AAAA"):
+                        data = await self.list_dns_records(
+                            zone_id, record_type=check_type
+                        )
+                        candidates.extend(
+                            r for r in data.get("result", [])
+                            if _names_match(r.get("name", ""), rec_name)
+                        )
 
             if not candidates:
+                log.warning(
+                    "No conflicting record found for %s %s", rec_type, rec_name
+                )
                 return None
+
+            log.info(
+                "Found %d conflicting record(s) for %s %s, replacing",
+                len(candidates), rec_type, rec_name,
+            )
 
             # For TXT records, try to match by content prefix to replace
             # the right record (e.g. replace old SPF, not verification TXT)
@@ -194,9 +226,21 @@ class CloudflareAPI:
                         target = c
                         break
 
+            # If conflicting record is a different type (e.g. A blocking CNAME),
+            # delete it first then create the new one
+            if target.get("type", "").upper() != rec_type:
+                log.info(
+                    "Deleting conflicting %s record %s to make way for %s",
+                    target.get("type"), target.get("name"), rec_type,
+                )
+                await self.delete_dns_record(zone_id, target["id"])
+                result = await self.create_dns_record(zone_id, record)
+                return result.get("result", result)
+
             result = await self.update_dns_record(zone_id, target["id"], record)
             return result.get("result", result)
-        except Exception:
+        except Exception as exc:
+            log.error("_replace_conflicting failed: %s", exc)
             return None
 
     # ------------------------------------------------------------------

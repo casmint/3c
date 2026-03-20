@@ -25,9 +25,15 @@ function parseMigaduDns(raw) {
         });
     }
 
-    // Verification TXT — try multiple key names
+    // Verification TXT — Migadu returns just the token, need "hosted-email-verify=" prefix
     const verify = data.dns_verification || data.verification || data.verify;
-    if (verify) add('verification', verify);
+    if (verify) {
+        const val = verify.value || verify.content || '';
+        const fixed = val && !val.startsWith('hosted-email-verify=')
+            ? {...verify, value: `hosted-email-verify=${val}`, content: `hosted-email-verify=${val}`}
+            : verify;
+        add('verification', fixed);
+    }
 
     // MX records (array)
     const mxArr = data.mx_records || data.mx || [];
