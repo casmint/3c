@@ -3,6 +3,9 @@
 const Pages = {
     projects: [],
     pollingTimers: {},
+    sortBy: 'updated',   // updated | name | created
+    perPage: 15,
+    currentPage: 1,
 
     async render() {
         const content = $('#content');
@@ -16,10 +19,29 @@ const Pages = {
                 <a href="https://dash.cloudflare.com/?to=/:account/pages" data-external target="_blank">Open CF Pages Setup &rarr;</a><br>
                 Subsequent deployments are fully API-driven.
             </div>
+            <div class="toolbar" style="margin-bottom:12px">
+                <input type="text" class="search-input" id="pages-search" placeholder="Search projects...">
+                <select class="form-select" id="pages-sort" style="width:180px">
+                    <option value="updated">Last deployed</option>
+                    <option value="name">Name A-Z</option>
+                    <option value="created">Date created</option>
+                </select>
+            </div>
             <div id="pages-container"><div class="loading">Loading Pages projects...</div></div>`;
 
         await this.loadProjects();
         $('#new-project-btn')?.addEventListener('click', () => this.showNewProjectModal());
+
+        $('#pages-sort')?.addEventListener('change', (e) => {
+            this.sortBy = e.target.value;
+            this.currentPage = 1;
+            this.renderProjects();
+        });
+
+        $('#pages-search')?.addEventListener('input', () => {
+            this.currentPage = 1;
+            this.renderProjects();
+        });
     },
 
     async loadProjects() {
@@ -28,59 +50,163 @@ const Pages = {
             this.projects = data.result || [];
             this.renderProjects();
         } catch (err) {
-            $('#pages-container').innerHTML =
-                `<div class="error-message">Failed to load projects: ${escapeHtml(err.message)}</div>`;
+            const c = $('#pages-container');
+            if (c) c.innerHTML = `<div class="error-message">Failed to load projects: ${escapeHtml(err.message)}</div>`;
         }
     },
 
+    getSorted() {
+        const query = ($('#pages-search')?.value || '').toLowerCase().trim();
+        let filtered = this.projects;
+        if (query) {
+            filtered = filtered.filter(p =>
+                p.name.toLowerCase().includes(query) ||
+                (p.subdomain || '').toLowerCase().includes(query) ||
+                (p.domains || []).some(d => d.toLowerCase().includes(query)) ||
+                (p.source?.config?.repo_name || '').toLowerCase().includes(query)
+            );
+        }
+
+        const sorted = [...filtered];
+        if (this.sortBy === 'name') {
+            sorted.sort((a, b) => a.name.localeCompare(b.name));
+        } else if (this.sortBy === 'created') {
+            sorted.sort((a, b) => new Date(b.created_on || 0) - new Date(a.created_on || 0));
+        } else {
+            // updated = last deployed
+            sorted.sort((a, b) => {
+                const aDate = a.latest_deployment?.created_on || a.created_on || '';
+                const bDate = b.latest_deployment?.created_on || b.created_on || '';
+                return new Date(bDate) - new Date(aDate);
+            });
+        }
+        return sorted;
+    },
+
     renderProjects() {
-        if (!this.projects.length) {
-            $('#pages-container').innerHTML = '<div class="info-message">No Pages projects found.</div>';
+        const container = $('#pages-container');
+        if (!container) return;
+
+        const sorted = this.getSorted();
+        if (!sorted.length) {
+            container.innerHTML = this.projects.length
+                ? '<div class="info-message">No projects match your search.</div>'
+                : '<div class="info-message">No Pages projects found.</div>';
             return;
         }
 
-        const cards = this.projects.map(p => {
-            const latest = p.latest_deployment;
-            let statusHtml = '<span class="text-muted">No deployments</span>';
-            if (latest) {
-                const stage = latest.latest_stage || {};
-                const status = stage.status || 'unknown';
-                const dotClass = status === 'success' ? 'dot-success'
-                    : status === 'active' ? 'dot-building'
-                    : status === 'failure' ? 'dot-failed' : '';
-                const time = latest.created_on ? new Date(latest.created_on).toLocaleString() : '';
-                statusHtml = `<span class="deploy-status">
-                    <span class="dot ${dotClass}"></span>
-                    ${escapeHtml(stage.name || status)} · ${time}
-                </span>`;
-            }
+        // Pagination
+        const totalPages = Math.ceil(sorted.length / this.perPage);
+        if (this.currentPage > totalPages) this.currentPage = totalPages;
+        const start = (this.currentPage - 1) * this.perPage;
+        const page = sorted.slice(start, start + this.perPage);
 
-            const repo = p.source?.config?.repo_name
-                ? `<div class="meta">Repo: ${escapeHtml(p.source.config.repo_name)}</div>` : '';
-            const domains = (p.domains || []).map(d => escapeHtml(d)).join(', ');
-            const domainsHtml = domains
-                ? `<div class="meta">Domains: ${domains}</div>` : '';
-            const subdomain = `${p.subdomain || p.name + '.pages.dev'}`;
+        const rows = page.map(p => this.renderRow(p)).join('');
 
-            return `<div class="project-card" data-project="${escapeHtml(p.name)}">
-                <h3>${escapeHtml(p.name)}</h3>
-                <div class="meta"><a href="https://${escapeHtml(subdomain)}" data-external target="_blank">${escapeHtml(subdomain)}</a></div>
-                ${repo}
-                ${domainsHtml}
-                <div class="meta mt-12">${statusHtml}</div>
-                <div id="deploy-status-${escapeHtml(p.name)}"></div>
-                <div class="card-actions">
-                    <button class="btn btn-sm btn-accent" data-deploy="${escapeHtml(p.name)}">D Deploy</button>
-                </div>
-            </div>`;
-        }).join('');
+        const paginationHtml = totalPages > 1 ? this.renderPagination(sorted.length, totalPages) : '';
 
-        $('#pages-container').innerHTML = `<div class="project-cards">${cards}</div>`;
+        container.innerHTML = `
+            <div class="text-muted" style="font-size:11px;margin-bottom:8px">${sorted.length} project${sorted.length !== 1 ? 's' : ''}</div>
+            <div class="pages-list">${rows}</div>
+            ${paginationHtml}`;
 
         // Bind deploy buttons
         $$('[data-deploy]').forEach(btn => {
             btn.addEventListener('click', () => this.triggerDeploy(btn.dataset.deploy));
         });
+
+        // Bind pagination
+        $$('[data-pages-page]').forEach(btn => {
+            btn.addEventListener('click', () => {
+                this.currentPage = parseInt(btn.dataset.pagesPage);
+                this.renderProjects();
+            });
+        });
+    },
+
+    renderRow(p) {
+        const latest = p.latest_deployment;
+        const subdomain = p.subdomain || `${p.name}.pages.dev`;
+        const repo = p.source?.config?.repo_name || '';
+        const domains = (p.domains || []).join(', ');
+
+        // Deploy status
+        let statusDot = '', statusText = '', timeText = '';
+        if (latest) {
+            const stage = latest.latest_stage || {};
+            const status = stage.status || 'unknown';
+            statusDot = status === 'success' ? 'dot-success'
+                : status === 'active' ? 'dot-building'
+                : status === 'failure' ? 'dot-failed' : '';
+            statusText = stage.name || status;
+            timeText = latest.created_on ? this.timeAgo(latest.created_on) : '';
+        }
+
+        // Commit info
+        let commitHtml = '';
+        if (latest?.deployment_trigger?.metadata) {
+            const meta = latest.deployment_trigger.metadata;
+            const msg = meta.commit_message || '';
+            const branch = meta.branch || '';
+            if (msg || branch) {
+                commitHtml = `<span class="text-muted" style="font-size:11px">
+                    ${branch ? `<span class="mono">${escapeHtml(branch)}</span>` : ''}
+                    ${msg ? ` — ${escapeHtml(msg.substring(0, 60))}${msg.length > 60 ? '...' : ''}` : ''}
+                </span>`;
+            }
+        }
+
+        return `
+            <div class="pages-row" data-project="${escapeHtml(p.name)}">
+                <div class="pages-row-main">
+                    <div class="pages-row-info">
+                        <div class="pages-row-title">
+                            <strong>${escapeHtml(p.name)}</strong>
+                            <a href="https://${escapeHtml(subdomain)}" data-external target="_blank" class="text-muted mono" style="font-size:11px;margin-left:8px">${escapeHtml(subdomain)}</a>
+                        </div>
+                        <div class="pages-row-meta">
+                            ${repo ? `<span class="text-muted" style="font-size:11px">Repo: <span class="mono">${escapeHtml(repo)}</span></span>` : ''}
+                            ${domains ? `<span class="text-muted" style="font-size:11px;margin-left:12px">Domains: ${escapeHtml(domains)}</span>` : ''}
+                        </div>
+                        ${commitHtml ? `<div style="margin-top:2px">${commitHtml}</div>` : ''}
+                    </div>
+                    <div class="pages-row-right">
+                        ${latest ? `
+                            <div class="pages-row-status">
+                                <span class="dot ${statusDot}"></span>
+                                <span style="font-size:11px">${escapeHtml(statusText)}</span>
+                                <span class="text-muted" style="font-size:11px;margin-left:4px">${timeText}</span>
+                            </div>
+                        ` : '<span class="text-muted" style="font-size:11px">No deployments</span>'}
+                        <button class="btn btn-sm btn-accent" data-deploy="${escapeHtml(p.name)}">Deploy</button>
+                    </div>
+                </div>
+                <div id="deploy-status-${escapeHtml(p.name)}"></div>
+            </div>`;
+    },
+
+    renderPagination(total, totalPages) {
+        const pages = [];
+        for (let i = 1; i <= totalPages; i++) {
+            const cls = i === this.currentPage ? 'btn btn-sm btn-accent' : 'btn btn-sm';
+            pages.push(`<button class="${cls}" data-pages-page="${i}">${i}</button>`);
+        }
+        return `<div style="display:flex;gap:4px;justify-content:center;margin-top:16px">${pages.join('')}</div>`;
+    },
+
+    timeAgo(dateStr) {
+        const now = Date.now();
+        const then = new Date(dateStr).getTime();
+        const diff = now - then;
+        const mins = Math.floor(diff / 60000);
+        if (mins < 1) return 'just now';
+        if (mins < 60) return `${mins}m ago`;
+        const hours = Math.floor(mins / 60);
+        if (hours < 24) return `${hours}h ago`;
+        const days = Math.floor(hours / 24);
+        if (days < 30) return `${days}d ago`;
+        const months = Math.floor(days / 30);
+        return `${months}mo ago`;
     },
 
     async triggerDeploy(projectName) {
@@ -105,7 +231,6 @@ const Pages = {
     },
 
     pollDeployment(projectName, depId, statusEl) {
-        // Clear existing timer for this project
         if (this.pollingTimers[projectName]) clearInterval(this.pollingTimers[projectName]);
 
         this.pollingTimers[projectName] = setInterval(async () => {
@@ -169,7 +294,6 @@ const Pages = {
                 const subdomain = `${name}.pages.dev`;
                 msg.innerHTML = `<div class="success-message">Project created! Subdomain: ${subdomain}</div>`;
 
-                // Offer CNAME record
                 const cnameOffer = overlay.querySelector('#pages-cname-offer');
                 cnameOffer.classList.remove('hidden');
                 cnameOffer.innerHTML = `
@@ -179,7 +303,7 @@ const Pages = {
                             <label>Domain (e.g. www.example.com)</label>
                             <input type="text" class="form-input" id="cname-domain" placeholder="www.example.com">
                         </div>
-                        <div class="info-message">Will create: CNAME → ${escapeHtml(subdomain)} (proxied)</div>
+                        <div class="info-message">Will create: CNAME &rarr; ${escapeHtml(subdomain)} (proxied)</div>
                         <div class="btn-row">
                             <button class="btn" id="cname-skip">Skip</button>
                             <button class="btn btn-accent" id="cname-add">Add CNAME</button>
@@ -200,7 +324,6 @@ const Pages = {
                         return;
                     }
 
-                    // Need to find the zone for this domain
                     const parts = domain.split('.');
                     const zoneName = parts.slice(-2).join('.');
                     cnameMsg.innerHTML = '<div class="loading">Looking up zone...</div>';

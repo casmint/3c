@@ -676,6 +676,64 @@ a:hover { text-decoration: underline; }
 ::-webkit-scrollbar-thumb:hover { background: var(--text-muted); }
 
 /* Project cards for Pages */
+/* Pages list view */
+.pages-list {
+    display: flex;
+    flex-direction: column;
+}
+
+.pages-row {
+    border: 1px solid var(--border);
+    border-bottom: none;
+    padding: 14px 18px;
+    background: var(--bg-secondary);
+}
+
+.pages-row:last-child {
+    border-bottom: 1px solid var(--border);
+}
+
+.pages-row:hover {
+    background: var(--bg-tertiary);
+}
+
+.pages-row-main {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 16px;
+}
+
+.pages-row-info {
+    flex: 1;
+    min-width: 0;
+}
+
+.pages-row-title {
+    display: flex;
+    align-items: baseline;
+    gap: 4px;
+}
+
+.pages-row-meta {
+    margin-top: 3px;
+}
+
+.pages-row-right {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    flex-shrink: 0;
+}
+
+.pages-row-status {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    white-space: nowrap;
+}
+
+/* Legacy grid (kept for reference, unused) */
 .project-cards {
     display: grid;
     grid-template-columns: repeat(auto-fill, minmax(340px, 1fr));
