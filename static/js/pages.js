@@ -2,17 +2,19 @@
 
 const Pages = {
     projects: [],
+    notes: {},
     pollingTimers: {},
-    sortBy: 'updated',   // updated | name | created
+    sortBy: 'updated',
     perPage: 15,
     currentPage: 1,
+    cfAccountId: null,
 
     async render() {
         const content = $('#content');
         content.innerHTML = `
             <div class="page-header">
                 <h1>Pages</h1>
-                <button class="btn btn-accent" id="new-project-btn">+ New Project</button>
+                <a href="#" id="new-project-link" target="_blank" rel="noopener" class="btn btn-accent">New Project ↗</a>
             </div>
             <div class="notice">
                 <strong>Note:</strong> Initial GitHub repository connection requires a one-time visit to the Cloudflare dashboard.
@@ -29,8 +31,20 @@ const Pages = {
             </div>
             <div id="pages-container"><div class="loading">Loading Pages projects...</div></div>`;
 
-        await this.loadProjects();
-        $('#new-project-btn')?.addEventListener('click', () => this.showNewProjectModal());
+        // Fetch account ID for the "New Project" link
+        API.get('/api/cf/account-id').then(data => {
+            this.cfAccountId = data.account_id;
+            const link = $('#new-project-link');
+            if (link && this.cfAccountId) {
+                link.href = `https://dash.cloudflare.com/${this.cfAccountId}/workers-and-pages/create/pages`;
+            }
+        }).catch(() => {});
+
+        // Load notes and projects in parallel
+        const [, ] = await Promise.all([
+            this.loadNotes(),
+            this.loadProjects(),
+        ]);
 
         $('#pages-sort')?.addEventListener('change', (e) => {
             this.sortBy = e.target.value;
@@ -42,6 +56,12 @@ const Pages = {
             this.currentPage = 1;
             this.renderProjects();
         });
+    },
+
+    async loadNotes() {
+        try {
+            this.notes = await API.get('/api/notes/pages');
+        } catch { this.notes = {}; }
     },
 
     async loadProjects() {
@@ -63,7 +83,8 @@ const Pages = {
                 p.name.toLowerCase().includes(query) ||
                 (p.subdomain || '').toLowerCase().includes(query) ||
                 (p.domains || []).some(d => d.toLowerCase().includes(query)) ||
-                (p.source?.config?.repo_name || '').toLowerCase().includes(query)
+                (p.source?.config?.repo_name || '').toLowerCase().includes(query) ||
+                (this.notes[p.name] || '').toLowerCase().includes(query)
             );
         }
 
@@ -73,7 +94,6 @@ const Pages = {
         } else if (this.sortBy === 'created') {
             sorted.sort((a, b) => new Date(b.created_on || 0) - new Date(a.created_on || 0));
         } else {
-            // updated = last deployed
             sorted.sort((a, b) => {
                 const aDate = a.latest_deployment?.created_on || a.created_on || '';
                 const bDate = b.latest_deployment?.created_on || b.created_on || '';
@@ -95,15 +115,13 @@ const Pages = {
             return;
         }
 
-        // Pagination
         const totalPages = Math.ceil(sorted.length / this.perPage);
         if (this.currentPage > totalPages) this.currentPage = totalPages;
         const start = (this.currentPage - 1) * this.perPage;
         const page = sorted.slice(start, start + this.perPage);
 
         const rows = page.map(p => this.renderRow(p)).join('');
-
-        const paginationHtml = totalPages > 1 ? this.renderPagination(sorted.length, totalPages) : '';
+        const paginationHtml = totalPages > 1 ? this.renderPagination(totalPages) : '';
 
         container.innerHTML = `
             <div class="text-muted" style="font-size:11px;margin-bottom:8px">${sorted.length} project${sorted.length !== 1 ? 's' : ''}</div>
@@ -113,6 +131,19 @@ const Pages = {
         // Bind deploy buttons
         $$('[data-deploy]').forEach(btn => {
             btn.addEventListener('click', () => this.triggerDeploy(btn.dataset.deploy));
+        });
+
+        // Bind note edit buttons
+        $$('[data-edit-note]').forEach(btn => {
+            btn.addEventListener('click', () => this.editNote(btn.dataset.editNote));
+        });
+
+        // Bind project name links (detail view)
+        $$('[data-project-detail]').forEach(link => {
+            link.addEventListener('click', (e) => {
+                e.preventDefault();
+                Router.navigate(`/cf/pages/${link.dataset.projectDetail}`);
+            });
         });
 
         // Bind pagination
@@ -128,7 +159,11 @@ const Pages = {
         const latest = p.latest_deployment;
         const subdomain = p.subdomain || `${p.name}.pages.dev`;
         const repo = p.source?.config?.repo_name || '';
-        const domains = (p.domains || []).join(', ');
+        const owner = p.source?.config?.owner || '';
+        const githubUrl = repo && owner ? `https://github.com/${owner}/${repo}` : (repo ? `https://github.com/${repo}` : '');
+
+        // Custom domains: filter out the default .pages.dev
+        const customDomains = (p.domains || []).filter(d => !d.endsWith('.pages.dev'));
 
         // Deploy status
         let statusDot = '', statusText = '', timeText = '';
@@ -142,35 +177,59 @@ const Pages = {
             timeText = latest.created_on ? this.timeAgo(latest.created_on) : '';
         }
 
-        // Commit info
+        // Commit info with date
         let commitHtml = '';
         if (latest?.deployment_trigger?.metadata) {
             const meta = latest.deployment_trigger.metadata;
             const msg = meta.commit_message || '';
             const branch = meta.branch || '';
-            if (msg || branch) {
-                commitHtml = `<span class="text-muted" style="font-size:11px">
-                    ${branch ? `<span class="mono">${escapeHtml(branch)}</span>` : ''}
-                    ${msg ? ` — ${escapeHtml(msg.substring(0, 60))}${msg.length > 60 ? '...' : ''}` : ''}
-                </span>`;
+            const commitDate = latest.created_on ? this.formatShortDate(latest.created_on) : '';
+            const parts = [];
+            if (branch) parts.push(`<span class="mono">${escapeHtml(branch)}</span>`);
+            if (commitDate) parts.push(commitDate);
+            if (msg) parts.push(escapeHtml(msg.substring(0, 60)) + (msg.length > 60 ? '...' : ''));
+            if (parts.length) {
+                commitHtml = `<span class="text-muted" style="font-size:11px">${parts.join(' — ')}</span>`;
             }
         }
 
+        // Repo link
+        const repoHtml = repo
+            ? `<span style="font-size:11px">Repo: <a href="${escapeHtml(githubUrl)}" target="_blank" rel="noopener" style="color:var(--accent)">${escapeHtml(repo)}</a></span>`
+            : '';
+
+        // Custom domains
+        let domainsHtml = '';
+        if (customDomains.length) {
+            const domLinks = customDomains.map(d =>
+                `<a href="https://${escapeHtml(d)}" target="_blank" rel="noopener" style="color:var(--accent)">${escapeHtml(d)}</a>`
+            ).join(', ');
+            domainsHtml = `<span class="text-muted" style="font-size:11px;margin-left:12px">Domains: ${domLinks}</span>`;
+        }
+
+        // Note
+        const note = this.notes[p.name] || '';
+        const noteHtml = note
+            ? `<span class="pages-note" title="${escapeHtml(note)}">${escapeHtml(note.length > 30 ? note.substring(0, 30) + '...' : note)}</span>`
+            : '';
+
         return `
-            <div class="pages-row" data-project="${escapeHtml(p.name)}">
+            <div class="pages-row">
                 <div class="pages-row-main">
                     <div class="pages-row-info">
                         <div class="pages-row-title">
-                            <strong>${escapeHtml(p.name)}</strong>
+                            <a href="/cf/pages/${encodeURIComponent(p.name)}" data-project-detail="${escapeHtml(p.name)}" style="color:var(--text);font-weight:600;text-decoration:none">${escapeHtml(p.name)}</a>
                             <a href="https://${escapeHtml(subdomain)}" data-external target="_blank" class="text-muted mono" style="font-size:11px;margin-left:8px">${escapeHtml(subdomain)}</a>
                         </div>
                         <div class="pages-row-meta">
-                            ${repo ? `<span class="text-muted" style="font-size:11px">Repo: <span class="mono">${escapeHtml(repo)}</span></span>` : ''}
-                            ${domains ? `<span class="text-muted" style="font-size:11px;margin-left:12px">Domains: ${escapeHtml(domains)}</span>` : ''}
+                            ${repoHtml}
+                            ${domainsHtml}
                         </div>
                         ${commitHtml ? `<div style="margin-top:2px">${commitHtml}</div>` : ''}
                     </div>
                     <div class="pages-row-right">
+                        ${noteHtml}
+                        <button class="btn btn-sm" data-edit-note="${escapeHtml(p.name)}" title="Edit note" style="font-size:10px;padding:2px 6px">✏</button>
                         ${latest ? `
                             <div class="pages-row-status">
                                 <span class="dot ${statusDot}"></span>
@@ -185,7 +244,7 @@ const Pages = {
             </div>`;
     },
 
-    renderPagination(total, totalPages) {
+    renderPagination(totalPages) {
         const pages = [];
         for (let i = 1; i <= totalPages; i++) {
             const cls = i === this.currentPage ? 'btn btn-sm btn-accent' : 'btn btn-sm';
@@ -208,6 +267,209 @@ const Pages = {
         const months = Math.floor(days / 30);
         return `${months}mo ago`;
     },
+
+    formatShortDate(dateStr) {
+        const d = new Date(dateStr);
+        const yy = String(d.getFullYear()).slice(2);
+        const mm = String(d.getMonth() + 1).padStart(2, '0');
+        const dd = String(d.getDate()).padStart(2, '0');
+        const hh = String(d.getHours()).padStart(2, '0');
+        const mi = String(d.getMinutes()).padStart(2, '0');
+        return `${yy}/${mm}/${dd} ${hh}:${mi}`;
+    },
+
+    editNote(projectName) {
+        const current = this.notes[projectName] || '';
+        const overlay = showModal(`
+            <button class="modal-close">&times;</button>
+            <h2>Note: ${escapeHtml(projectName)}</h2>
+            <div class="form-group">
+                <label>Custom note</label>
+                <textarea class="form-input" id="note-input" rows="3" placeholder="What does this project do?">${escapeHtml(current)}</textarea>
+            </div>
+            <div id="note-msg"></div>
+            <div class="btn-row">
+                ${current ? '<button class="btn btn-danger" id="note-del">Remove</button>' : ''}
+                <button class="btn btn-accent" id="note-save">Save</button>
+            </div>`);
+
+        overlay.querySelector('#note-save').addEventListener('click', async () => {
+            const val = overlay.querySelector('#note-input').value.trim();
+            const msg = overlay.querySelector('#note-msg');
+            try {
+                await API.put(`/api/notes/pages/${encodeURIComponent(projectName)}`, { note: val });
+                this.notes[projectName] = val;
+                closeModal();
+                this.renderProjects();
+            } catch (e) {
+                msg.innerHTML = `<div class="error-message">${escapeHtml(e.message)}</div>`;
+            }
+        });
+
+        overlay.querySelector('#note-del')?.addEventListener('click', async () => {
+            try {
+                await API.del(`/api/notes/pages/${encodeURIComponent(projectName)}`);
+                delete this.notes[projectName];
+                closeModal();
+                this.renderProjects();
+            } catch (e) {
+                overlay.querySelector('#note-msg').innerHTML = `<div class="error-message">${escapeHtml(e.message)}</div>`;
+            }
+        });
+    },
+
+    // ------------------------------------------------------------------
+    // Project detail view
+    // ------------------------------------------------------------------
+
+    async renderDetail(match) {
+        const projectName = decodeURIComponent(match[1]);
+        const content = $('#content');
+        content.innerHTML = `
+            <div class="page-header">
+                <div style="display:flex;align-items:center;gap:12px">
+                    <a href="/cf/pages" class="btn btn-sm">← Back</a>
+                    <h1>${escapeHtml(projectName)}</h1>
+                </div>
+            </div>
+            <div id="project-detail"><div class="loading">Loading project...</div></div>`;
+
+        try {
+            const data = await API.get('/api/cf/pages/projects');
+            const project = (data.result || []).find(p => p.name === projectName);
+            if (!project) {
+                $('#project-detail').innerHTML = '<div class="error-message">Project not found.</div>';
+                return;
+            }
+            this.renderDetailContent(project);
+        } catch (err) {
+            $('#project-detail').innerHTML = `<div class="error-message">${escapeHtml(err.message)}</div>`;
+        }
+    },
+
+    renderDetailContent(p) {
+        const container = $('#project-detail');
+        if (!container) return;
+
+        const subdomain = p.subdomain || `${p.name}.pages.dev`;
+        const repo = p.source?.config?.repo_name || '';
+        const owner = p.source?.config?.owner || '';
+        const githubUrl = repo && owner ? `https://github.com/${owner}/${repo}` : '';
+        const customDomains = (p.domains || []).filter(d => !d.endsWith('.pages.dev'));
+        const allDomains = p.domains || [];
+        const latest = p.latest_deployment;
+
+        // Recent deployments
+        let deploymentsHtml = '<div class="info-message">No deployments yet.</div>';
+        if (latest) {
+            const stage = latest.latest_stage || {};
+            const status = stage.status || 'unknown';
+            const dotClass = status === 'success' ? 'dot-success' : status === 'failure' ? 'dot-failed' : 'dot-building';
+            deploymentsHtml = `
+                <div style="padding:10px 0;border-bottom:1px solid var(--border)">
+                    <span class="dot ${dotClass}"></span>
+                    <strong>${escapeHtml(stage.name || status)}</strong>
+                    <span class="text-muted" style="margin-left:8px">${latest.created_on ? this.formatShortDate(latest.created_on) : ''}</span>
+                    ${latest.deployment_trigger?.metadata?.commit_message ? `<span class="text-muted" style="margin-left:8px;font-size:11px">${escapeHtml(latest.deployment_trigger.metadata.commit_message.substring(0, 80))}</span>` : ''}
+                </div>`;
+        }
+
+        container.innerHTML = `
+            <table class="data-table" style="margin-bottom:24px">
+                <tbody>
+                    <tr><td style="width:160px"><strong>Subdomain</strong></td><td><a href="https://${escapeHtml(subdomain)}" target="_blank" rel="noopener">${escapeHtml(subdomain)}</a></td></tr>
+                    ${githubUrl ? `<tr><td><strong>Repository</strong></td><td><a href="${escapeHtml(githubUrl)}" target="_blank" rel="noopener" style="color:var(--accent)">${escapeHtml(owner)}/${escapeHtml(repo)}</a></td></tr>` : ''}
+                    <tr><td><strong>Branch</strong></td><td>${escapeHtml(p.production_branch || 'main')}</td></tr>
+                    <tr><td><strong>Created</strong></td><td>${p.created_on ? new Date(p.created_on).toLocaleString() : '—'}</td></tr>
+                </tbody>
+            </table>
+
+            <h3 style="font-size:14px;margin-bottom:10px">Custom Domains</h3>
+            <div id="domains-section" style="margin-bottom:24px">
+                ${allDomains.length ? allDomains.map(d => {
+                    const isDefault = d.endsWith('.pages.dev');
+                    return `<div style="padding:6px 0;display:flex;align-items:center;gap:8px;border-bottom:1px solid var(--border)">
+                        <a href="https://${escapeHtml(d)}" target="_blank" rel="noopener" style="color:${isDefault ? 'var(--text-muted)' : 'var(--accent)'}">${escapeHtml(d)}</a>
+                        ${isDefault ? '<span class="text-muted" style="font-size:10px">default</span>' : ''}
+                    </div>`;
+                }).join('') : '<div class="text-muted">No custom domains</div>'}
+                <div style="margin-top:10px">
+                    <button class="btn btn-sm btn-accent" id="add-domain-btn">+ Add Custom Domain</button>
+                </div>
+                <div id="add-domain-form" class="hidden" style="margin-top:10px">
+                    <div style="display:flex;gap:8px;align-items:center">
+                        <input type="text" class="form-input" id="custom-domain-input" placeholder="www.example.com" style="flex:1">
+                        <button class="btn btn-sm btn-accent" id="custom-domain-save">Add</button>
+                    </div>
+                    <div id="custom-domain-msg" class="mt-8"></div>
+                </div>
+            </div>
+
+            <h3 style="font-size:14px;margin-bottom:10px">Latest Deployment</h3>
+            ${deploymentsHtml}
+
+            <div class="mt-16" style="display:flex;gap:8px">
+                <button class="btn btn-accent" id="detail-deploy-btn">Deploy Now</button>
+            </div>
+            <div id="detail-deploy-msg" class="mt-8"></div>`;
+
+        // Add domain button
+        container.querySelector('#add-domain-btn')?.addEventListener('click', () => {
+            container.querySelector('#add-domain-form').classList.toggle('hidden');
+        });
+
+        // Save custom domain — create CNAME record pointing to pages.dev subdomain
+        container.querySelector('#custom-domain-save')?.addEventListener('click', async () => {
+            const domain = container.querySelector('#custom-domain-input').value.trim();
+            const msg = container.querySelector('#custom-domain-msg');
+            if (!domain) { msg.innerHTML = '<div class="error-message">Enter a domain</div>'; return; }
+
+            msg.innerHTML = '<div class="loading">Setting up domain...</div>';
+
+            // Extract zone name from domain
+            const parts = domain.split('.');
+            const zoneName = parts.slice(-2).join('.');
+
+            try {
+                const zoneData = await API.get(`/api/cf/zones/resolve/${zoneName}`);
+                const zoneId = zoneData.result.id;
+
+                await API.post(`/api/cf/zones/${zoneId}/dns`, {
+                    type: 'CNAME',
+                    name: domain,
+                    content: subdomain,
+                    proxied: true,
+                    ttl: 1,
+                });
+
+                msg.innerHTML = `<div class="success-message">CNAME record created: ${escapeHtml(domain)} → ${escapeHtml(subdomain)}</div>`;
+            } catch (err) {
+                msg.innerHTML = `<div class="error-message">${escapeHtml(err.message)}</div>`;
+            }
+        });
+
+        // Deploy button
+        container.querySelector('#detail-deploy-btn')?.addEventListener('click', async () => {
+            const msg = container.querySelector('#detail-deploy-msg');
+            msg.innerHTML = '<div class="loading">Triggering deployment...</div>';
+            try {
+                const data = await API.post(`/api/cf/pages/projects/${p.name}/deploy`, {});
+                const depId = data.result?.id;
+                if (depId) {
+                    msg.innerHTML = '<div class="loading">Deploying...</div>';
+                    this.pollDeployment(p.name, depId, msg);
+                } else {
+                    msg.innerHTML = '<div class="success-message">Deployment triggered!</div>';
+                }
+            } catch (err) {
+                msg.innerHTML = `<div class="error-message">${escapeHtml(err.message)}</div>`;
+            }
+        });
+    },
+
+    // ------------------------------------------------------------------
+    // Deploy
+    // ------------------------------------------------------------------
 
     async triggerDeploy(projectName) {
         const statusEl = $(`#deploy-status-${CSS.escape(projectName)}`);
@@ -257,103 +519,7 @@ const Pages = {
             }
         }, 5000);
     },
-
-    showNewProjectModal() {
-        const overlay = showModal(`
-            <button class="modal-close">&times;</button>
-            <h2>New Pages Project</h2>
-            <div class="form-group">
-                <label>Project Name</label>
-                <input type="text" class="form-input" id="pages-name" placeholder="my-project">
-            </div>
-            <div class="form-group">
-                <label>Production Branch</label>
-                <input type="text" class="form-input" id="pages-branch" placeholder="main" value="main">
-            </div>
-            <div id="pages-modal-msg"></div>
-            <div class="btn-row">
-                <button class="btn" onclick="closeModal()">Cancel</button>
-                <button class="btn btn-accent" id="pages-create-btn">Create</button>
-            </div>
-            <div id="pages-cname-offer" class="hidden"></div>`);
-
-        overlay.querySelector('#pages-create-btn').addEventListener('click', async () => {
-            const name = overlay.querySelector('#pages-name').value.trim();
-            const branch = overlay.querySelector('#pages-branch').value.trim() || 'main';
-            const msg = overlay.querySelector('#pages-modal-msg');
-
-            if (!name) {
-                msg.innerHTML = '<div class="error-message">Project name is required</div>';
-                return;
-            }
-
-            msg.innerHTML = '<div class="loading">Creating project...</div>';
-
-            try {
-                const data = await API.post('/api/cf/pages/projects', { name, production_branch: branch });
-                const subdomain = `${name}.pages.dev`;
-                msg.innerHTML = `<div class="success-message">Project created! Subdomain: ${subdomain}</div>`;
-
-                const cnameOffer = overlay.querySelector('#pages-cname-offer');
-                cnameOffer.classList.remove('hidden');
-                cnameOffer.innerHTML = `
-                    <div class="mt-16">
-                        <p class="mb-12">Add a CNAME record for a custom domain?</p>
-                        <div class="form-group">
-                            <label>Domain (e.g. www.example.com)</label>
-                            <input type="text" class="form-input" id="cname-domain" placeholder="www.example.com">
-                        </div>
-                        <div class="info-message">Will create: CNAME &rarr; ${escapeHtml(subdomain)} (proxied)</div>
-                        <div class="btn-row">
-                            <button class="btn" id="cname-skip">Skip</button>
-                            <button class="btn btn-accent" id="cname-add">Add CNAME</button>
-                        </div>
-                        <div id="cname-msg"></div>
-                    </div>`;
-
-                cnameOffer.querySelector('#cname-skip').addEventListener('click', () => {
-                    closeModal();
-                    this.loadProjects();
-                });
-
-                cnameOffer.querySelector('#cname-add').addEventListener('click', async () => {
-                    const domain = cnameOffer.querySelector('#cname-domain').value.trim();
-                    const cnameMsg = cnameOffer.querySelector('#cname-msg');
-                    if (!domain) {
-                        cnameMsg.innerHTML = '<div class="error-message">Enter a domain</div>';
-                        return;
-                    }
-
-                    const parts = domain.split('.');
-                    const zoneName = parts.slice(-2).join('.');
-                    cnameMsg.innerHTML = '<div class="loading">Looking up zone...</div>';
-
-                    try {
-                        const zoneData = await API.get(`/api/cf/zones/resolve/${zoneName}`);
-                        const zoneId = zoneData.result.id;
-
-                        await API.post(`/api/cf/zones/${zoneId}/dns`, {
-                            type: 'CNAME',
-                            name: domain,
-                            content: subdomain,
-                            proxied: true,
-                            ttl: 1,
-                        });
-
-                        cnameMsg.innerHTML = '<div class="success-message">CNAME record added!</div>';
-                        setTimeout(() => {
-                            closeModal();
-                            this.loadProjects();
-                        }, 1500);
-                    } catch (err) {
-                        cnameMsg.innerHTML = `<div class="error-message">${escapeHtml(err.message)}</div>`;
-                    }
-                });
-            } catch (err) {
-                msg.innerHTML = `<div class="error-message">Failed: ${escapeHtml(err.message)}</div>`;
-            }
-        });
-    },
 };
 
 Router.register('/cf/pages', () => Pages.render());
+Router.register('/cf/pages/([^/]+)', (m) => Pages.renderDetail(m));

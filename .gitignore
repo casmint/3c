@@ -34,5 +34,8 @@ c3-reference/
 # Docker
 *.log
 
+# Local data
+notes.json
+
 # Claude local settings (keep CLAUDE.md but not local overrides)
 .claude/settings.local.json

@@ -72,6 +72,51 @@ def create_app(config: AppConfig) -> FastAPI:
     async def api_config_status():
         return {"cloudflare": True, "porkbun": pb is not None, "migadu": mg is not None}
 
+    @app.get("/api/cf/account-id")
+    async def api_cf_account_id():
+        return {"account_id": config.cloudflare.account_id}
+
+    # ------------------------------------------------------------------
+    # Notes (local key-value storage for user annotations)
+    # ------------------------------------------------------------------
+    import json as _json
+
+    _notes_file = Path(__file__).resolve().parent.parent / "notes.json"
+
+    def _load_notes() -> dict:
+        if _notes_file.exists():
+            try:
+                return _json.loads(_notes_file.read_text())
+            except Exception:
+                return {}
+        return {}
+
+    def _save_notes(notes: dict):
+        _notes_file.write_text(_json.dumps(notes, indent=2))
+
+    @app.get("/api/notes/{namespace}")
+    async def api_get_notes(namespace: str):
+        notes = _load_notes()
+        return notes.get(namespace, {})
+
+    @app.put("/api/notes/{namespace}/{key}")
+    async def api_put_note(namespace: str, key: str, request: Request):
+        body = await request.json()
+        notes = _load_notes()
+        if namespace not in notes:
+            notes[namespace] = {}
+        notes[namespace][key] = body.get("note", "")
+        _save_notes(notes)
+        return {"ok": True}
+
+    @app.delete("/api/notes/{namespace}/{key}")
+    async def api_del_note(namespace: str, key: str):
+        notes = _load_notes()
+        if namespace in notes:
+            notes[namespace].pop(key, None)
+            _save_notes(notes)
+        return {"ok": True}
+
     @app.get("/api/settings/status")
     async def api_settings_status():
         """Quick connectivity check for all integrations."""

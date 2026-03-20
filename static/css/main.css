@@ -733,6 +733,18 @@ a:hover { text-decoration: underline; }
     white-space: nowrap;
 }
 
+.pages-note {
+    font-size: 10px;
+    color: var(--text-muted);
+    background: var(--bg-tertiary);
+    padding: 2px 8px;
+    border-radius: 3px;
+    max-width: 200px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
 /* Legacy grid (kept for reference, unused) */
 .project-cards {
     display: grid;
