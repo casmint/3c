@@ -170,9 +170,9 @@ const EmailDomains = {
                         <tr><td><strong>Can Receive</strong></td><td>${data.can_receive ? 'Yes' : 'No'}</td></tr>
                     </tbody>
                 </table>
+                ${!confirmed ? '<div class="info-message" style="margin-top:12px;font-size:11px">Domain will activate automatically once Migadu verifies DNS records.</div>' : ''}
                 <div class="mt-16">
                     <button class="btn" id="run-diag-btn">Run Diagnostics</button>
-                    ${!confirmed ? '<button class="btn btn-accent ml-8" id="activate-btn">Activate Domain</button>' : ''}
                 </div>
                 <div id="domain-action-msg" class="mt-12"></div>`;
 
@@ -182,18 +182,6 @@ const EmailDomains = {
                 try {
                     const diag = await API.get(`/api/email/domains/${encodeURIComponent(domain)}/diagnostics`);
                     msg.innerHTML = EmailDNS.renderDiagnostics(diag);
-                } catch (e) {
-                    msg.innerHTML = `<div class="error-message">${escapeHtml(e.message)}</div>`;
-                }
-            });
-
-            detail.querySelector('#activate-btn')?.addEventListener('click', async () => {
-                const msg = detail.querySelector('#domain-action-msg');
-                msg.innerHTML = '<div class="loading">Activating domain...</div>';
-                try {
-                    await API.post(`/api/email/domains/${encodeURIComponent(domain)}/activate`);
-                    msg.innerHTML = '<div class="success-message">Domain activated successfully.</div>';
-                    setTimeout(() => this.renderDetail(match), 1200);
                 } catch (e) {
                     msg.innerHTML = `<div class="error-message">${escapeHtml(e.message)}</div>`;
                 }
@@ -637,26 +625,17 @@ const EmailDomains = {
             try {
                 const diag = await API.get(`/api/email/domains/${encodeURIComponent(selectedDomain)}/diagnostics`);
                 const diagHtml = EmailDNS.renderDiagnostics(diag);
+                const allOk = diag.status === 'ok' || diag.status === 'passed';
+                const statusMsg = allOk
+                    ? '<div class="success-message" style="margin-bottom:12px">All checks passed — domain will activate automatically once Migadu confirms DNS.</div>'
+                    : '<div class="info-message" style="margin-bottom:12px">Some checks are failing. DNS propagation can take a few minutes — re-run to check again.</div>';
                 body.innerHTML = `
+                    ${statusMsg}
                     ${diagHtml}
-                    <div id="activate-msg" class="mt-12"></div>
                     <div class="btn-row mt-12">
                         <button class="btn" onclick="closeModal()">Close</button>
-                        <button class="btn btn-accent" id="final-activate-btn">Activate Domain</button>
                         <button class="btn" id="rerun-diag-btn">Re-run</button>
                     </div>`;
-
-                overlay.querySelector('#final-activate-btn').addEventListener('click', async () => {
-                    const amsg = overlay.querySelector('#activate-msg');
-                    amsg.innerHTML = '<div class="loading">Activating...</div>';
-                    try {
-                        await API.post(`/api/email/domains/${encodeURIComponent(selectedDomain)}/activate`);
-                        amsg.innerHTML = '<div class="success-message">Domain activated successfully!</div>';
-                        ZoneCache.invalidate();
-                    } catch (e) {
-                        amsg.innerHTML = `<div class="error-message">${escapeHtml(e.message)}</div>`;
-                    }
-                });
 
                 overlay.querySelector('#rerun-diag-btn').addEventListener('click', () => renderStep5());
             } catch (err) {
