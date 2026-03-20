@@ -120,7 +120,7 @@ const EmailDomains = {
                 </td>
                 <td>${badge}</td>
                 <td>${sendRecv}</td>
-                <td class="actions" style="white-space:nowrap">
+                <td class="actions">
                     <button class="btn btn-sm" data-catchall-domain="${escapeHtml(name)}">Catchall</button>
                     <a href="/email/domains/${encodeURIComponent(name)}/dns" class="btn btn-sm">DNS</a>
                     <button class="btn btn-sm" data-diag-domain="${escapeHtml(name)}">Diagnostics</button>

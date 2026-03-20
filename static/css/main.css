@@ -374,8 +374,11 @@ a:hover { text-decoration: underline; }
 
 .data-table .actions {
     white-space: nowrap;
-    display: flex;
-    gap: 4px;
+}
+
+.data-table .actions .btn,
+.data-table .actions a.btn {
+    margin-right: 4px;
 }
 
 .data-table .mono {
