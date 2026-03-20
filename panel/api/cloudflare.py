@@ -359,24 +359,12 @@ class CloudflareAPI:
     # ------------------------------------------------------------------
 
     async def list_pages_projects(self) -> dict:
-        """Fetch all Pages projects (auto-paginate)."""
-        all_projects = []
-        page = 1
-        while True:
-            resp = await self.client.get(
-                f"/accounts/{self.account_id}/pages/projects",
-                params={"per_page": 50, "page": page},
-            )
-            resp.raise_for_status()
-            data = resp.json()
-            results = data.get("result", [])
-            all_projects.extend(results)
-            info = data.get("result_info", {})
-            total_pages = info.get("total_pages", 1)
-            if page >= total_pages or not results:
-                break
-            page += 1
-        return {"result": all_projects}
+        """Fetch all Pages projects."""
+        resp = await self.client.get(
+            f"/accounts/{self.account_id}/pages/projects"
+        )
+        resp.raise_for_status()
+        return resp.json()
 
     async def create_pages_project(
         self, name: str, production_branch: str = "main"
