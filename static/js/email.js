@@ -102,9 +102,12 @@ const EmailDomains = {
         const rows = this.domains.map(d => {
             const name = d.name || d.domain || '';
             const confirmed = d.confirmed || d.state === 'active';
+            const pending = !confirmed && (d.can_send || d.can_receive || d.state === 'pending');
             const badge = confirmed
                 ? '<span class="badge badge-active">ACTIVE</span>'
-                : '<span class="badge badge-pending">INACTIVE</span>';
+                : pending
+                    ? '<span class="badge badge-pending">PENDING</span>'
+                    : '<span class="badge badge-moved">INACTIVE</span>';
             const sendRecv = `
                 <span class="badge ${d.can_send ? 'badge-active' : 'badge-moved'}" style="font-size:10px">${d.can_send ? 'SEND' : 'NO SEND'}</span>
                 <span class="badge ${d.can_receive ? 'badge-active' : 'badge-moved'}" style="font-size:10px">${d.can_receive ? 'RECV' : 'NO RECV'}</span>`;
@@ -161,11 +164,12 @@ const EmailDomains = {
         try {
             const data = await API.get(`/api/email/domains/${encodeURIComponent(domain)}`);
             const confirmed = data.confirmed || data.state === 'active';
+            const pending = !confirmed && (data.can_send || data.can_receive || data.state === 'pending');
             const detail = $('#email-domain-detail');
             detail.innerHTML = `
                 <table class="data-table">
                     <tbody>
-                        <tr><td style="width:160px"><strong>Status</strong></td><td>${confirmed ? '<span class="badge badge-active">ACTIVE</span>' : '<span class="badge badge-pending">INACTIVE</span>'}</td></tr>
+                        <tr><td style="width:160px"><strong>Status</strong></td><td>${confirmed ? '<span class="badge badge-active">ACTIVE</span>' : pending ? '<span class="badge badge-pending">PENDING</span>' : '<span class="badge badge-moved">INACTIVE</span>'}</td></tr>
                         <tr><td><strong>Can Send</strong></td><td>${data.can_send ? 'Yes' : 'No'}</td></tr>
                         <tr><td><strong>Can Receive</strong></td><td>${data.can_receive ? 'Yes' : 'No'}</td></tr>
                     </tbody>
@@ -904,14 +908,20 @@ const Mailboxes = {
         }
     },
 
+    catchallDestinations: [],
+
     async loadMailboxes() {
         if (!this.currentDomain) return;
         const container = $('#mailboxes-container');
         if (!container) return;
         container.innerHTML = '<div class="loading">Loading mailboxes...</div>';
         try {
-            const data = await API.get(`/api/email/mailboxes/${encodeURIComponent(this.currentDomain)}`);
+            const [data, catchData] = await Promise.all([
+                API.get(`/api/email/mailboxes/${encodeURIComponent(this.currentDomain)}`),
+                API.get(`/api/email/domains/${encodeURIComponent(this.currentDomain)}/catchall`).catch(() => ({})),
+            ]);
             this.mailboxes = Array.isArray(data) ? data : (data.mailboxes || []);
+            this.catchallDestinations = catchData.catchall_destinations || [];
             this.renderTable();
         } catch (err) {
             if (container.isConnected) container.innerHTML = `<div class="error-message">${escapeHtml(err.message)}</div>`;
@@ -921,8 +931,32 @@ const Mailboxes = {
     renderTable() {
         const container = $('#mailboxes-container');
         if (!container) return;
+
+        // Catchall banner
+        let catchallHtml = '';
+        if (this.catchallDestinations.length) {
+            const dests = this.catchallDestinations.map(d => escapeHtml(d)).join(', ');
+            catchallHtml = `
+                <div style="display:flex;align-items:center;justify-content:space-between;padding:10px 14px;margin-bottom:12px;background:var(--bg-tertiary);border:1px solid var(--border);border-radius:4px">
+                    <div>
+                        <span style="font-size:12px;font-weight:600">📬 Catchall active</span>
+                        <span class="mono text-muted" style="font-size:11px;margin-left:8px">*@${escapeHtml(this.currentDomain)} → ${dests}</span>
+                    </div>
+                    <button class="btn btn-sm" id="mb-catchall-btn">Configure</button>
+                </div>`;
+        } else {
+            catchallHtml = `
+                <div style="display:flex;align-items:center;justify-content:space-between;padding:10px 14px;margin-bottom:12px;background:var(--bg-secondary);border:1px solid var(--border);border-radius:4px">
+                    <span class="text-muted" style="font-size:12px">No catchall configured — unmatched email will be rejected.</span>
+                    <button class="btn btn-sm" id="mb-catchall-btn">Set up catchall</button>
+                </div>`;
+        }
+
         if (!this.mailboxes.length) {
-            container.innerHTML = '<div class="info-message">No mailboxes for this domain.</div>';
+            container.innerHTML = catchallHtml + '<div class="info-message">No mailboxes for this domain.</div>';
+            container.querySelector('#mb-catchall-btn')?.addEventListener('click', () => {
+                EmailDomains.showCatchallModal(this.currentDomain);
+            });
             return;
         }
 
@@ -952,12 +986,24 @@ const Mailboxes = {
         }).join('');
 
         container.innerHTML = `
+            ${catchallHtml}
             <table class="data-table">
                 <thead><tr>
                     <th>Address</th><th>Name</th><th>Status</th><th>Actions</th>
                 </tr></thead>
                 <tbody>${rows}</tbody>
             </table>`;
+
+        // Catchall button — refresh mailboxes when modal closes
+        container.querySelector('#mb-catchall-btn')?.addEventListener('click', () => {
+            EmailDomains.showCatchallModal(this.currentDomain);
+            const check = setInterval(() => {
+                if (!document.querySelector('.modal-overlay')) {
+                    clearInterval(check);
+                    this.loadMailboxes();
+                }
+            }, 300);
+        });
 
         // Bind events
         $$('[data-edit-mb]').forEach(btn => {
