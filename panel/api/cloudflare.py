@@ -359,20 +359,24 @@ class CloudflareAPI:
     # ------------------------------------------------------------------
 
     async def list_pages_projects(self) -> dict:
-        """Fetch all Pages projects.
-
-        The Pages API doesn't support standard page/per_page pagination.
-        It returns all projects in a single response (no pagination params).
-        """
-        resp = await self.client.get(
-            f"/accounts/{self.account_id}/pages/projects"
-        )
-        resp.raise_for_status()
-        data = resp.json()
-        results = data.get("result") or []
-        info = data.get("result_info")
-        print(f"[PAGES DEBUG] fetched={len(results)} result_info={info}", flush=True)
-        return data
+        """Fetch all Pages projects (auto-paginate, max 10 per page)."""
+        all_projects = []
+        page = 1
+        while True:
+            resp = await self.client.get(
+                f"/accounts/{self.account_id}/pages/projects",
+                params={"page": page},
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            results = data.get("result") or []
+            all_projects.extend(results)
+            info = data.get("result_info") or {}
+            total_pages = info.get("total_pages", 1)
+            if page >= total_pages or not results:
+                break
+            page += 1
+        return {"result": all_projects}
 
     async def create_pages_project(
         self, name: str, production_branch: str = "main"
