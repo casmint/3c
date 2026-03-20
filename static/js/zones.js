@@ -92,7 +92,16 @@ const Zones = {
             <h2>Add Zone</h2>
             <div class="form-group">
                 <label>Domain Name</label>
-                <div id="zone-select-container"><div class="loading" style="font-size:12px">Loading domains...</div></div>
+                <div style="position:relative">
+                    <input type="text" class="form-input" id="new-zone-name" placeholder="example.com" autocomplete="off">
+                    <div id="zone-suggestions" style="
+                        display:none;position:absolute;top:100%;left:0;right:0;z-index:10;
+                        max-height:200px;overflow-y:auto;
+                        background:var(--bg-tertiary);border:1px solid var(--border);border-top:none;
+                        font-size:12px;font-family:var(--font-mono);
+                    "></div>
+                </div>
+                <p id="zone-hint" class="text-muted" style="font-size:10px;margin-top:4px"></p>
             </div>
             <div id="add-zone-msg"></div>
             <div class="btn-row">
@@ -100,60 +109,78 @@ const Zones = {
             </div>
             <div id="add-zone-result" class="hidden"></div>`);
 
-        const selectContainer = overlay.querySelector('#zone-select-container');
-
-        // Try to load Porkbun domains for dropdown, fall back to text input
+        // Set up searchable autocomplete — loads Porkbun domains in background
+        const input = overlay.querySelector('#new-zone-name');
+        const sugBox = overlay.querySelector('#zone-suggestions');
+        const hint = overlay.querySelector('#zone-hint');
+        let pbAvailable = [];
         let usePorkbun = false;
-        try {
-            const pb = await API.get('/api/porkbun/available');
-            if (pb.available) {
+
+        // Load domains in background — modal is immediately usable
+        (async () => {
+            try {
+                const pb = await API.get('/api/porkbun/available');
+                if (!pb.available) return;
                 const domains = await DomainCache.get();
-                // Filter out domains that already have CF zones
                 const existingZones = new Set(this.allZones.map(z => z.name));
-                const available = domains.filter(d => !existingZones.has(d.domain));
-
-                if (available.length) {
-                    usePorkbun = true;
-                    const options = available
-                        .sort((a, b) => a.domain.localeCompare(b.domain))
-                        .map(d => `<option value="${escapeHtml(d.domain)}">${escapeHtml(d.domain)}</option>`)
-                        .join('');
-
-                    selectContainer.innerHTML = `
-                        <input type="text" class="form-input" id="zone-domain-search" placeholder="Type to filter..." style="margin-bottom:6px">
-                        <select class="form-select" id="new-zone-name" size="8" style="width:100%;height:auto">
-                            ${options}
-                        </select>
-                        <p class="text-muted" style="font-size:10px;margin-top:4px">${available.length} domains not yet on Cloudflare</p>`;
-
-                    // Wire up search filter
-                    const searchInput = overlay.querySelector('#zone-domain-search');
-                    const select = overlay.querySelector('#new-zone-name');
-                    searchInput.addEventListener('input', () => {
-                        const q = searchInput.value.toLowerCase();
-                        const filtered = available.filter(d => d.domain.toLowerCase().includes(q));
-                        select.innerHTML = filtered
-                            .map(d => `<option value="${escapeHtml(d.domain)}">${escapeHtml(d.domain)}</option>`)
-                            .join('');
-                    });
-                    // Auto-select first
-                    if (select.options.length) select.options[0].selected = true;
-                } else {
-                    // All domains already on CF
-                    selectContainer.innerHTML = `
-                        <input type="text" class="form-input" id="new-zone-name" placeholder="example.com">
-                        <p class="text-muted" style="font-size:10px;margin-top:4px">All Porkbun domains already on Cloudflare</p>`;
+                pbAvailable = domains
+                    .filter(d => !existingZones.has(d.domain))
+                    .map(d => d.domain)
+                    .sort();
+                usePorkbun = true;
+                if (hint) hint.textContent = `${pbAvailable.length} Porkbun domains not yet on Cloudflare`;
+                // If input is focused and empty, show suggestions
+                if (document.activeElement === input && !input.value.trim()) {
+                    showSuggestions('');
                 }
-            } else {
-                selectContainer.innerHTML = '<input type="text" class="form-input" id="new-zone-name" placeholder="example.com">';
+            } catch { /* Porkbun unavailable — input works as plain text */ }
+        })();
+
+        function showSuggestions(query) {
+            if (!pbAvailable.length) { sugBox.style.display = 'none'; return; }
+            const q = query.toLowerCase();
+            const matches = q
+                ? pbAvailable.filter(d => d.includes(q))
+                : pbAvailable.slice(0, 20);
+            if (!matches.length) { sugBox.style.display = 'none'; return; }
+            sugBox.innerHTML = matches.slice(0, 30).map(d =>
+                `<div class="zone-sug-item" style="padding:6px 10px;cursor:pointer;border-bottom:1px solid var(--border)" data-domain="${escapeHtml(d)}">${escapeHtml(d)}</div>`
+            ).join('');
+            if (matches.length > 30) {
+                sugBox.innerHTML += `<div class="text-muted" style="padding:4px 10px;font-size:10px">${matches.length - 30} more...</div>`;
             }
-        } catch {
-            selectContainer.innerHTML = '<input type="text" class="form-input" id="new-zone-name" placeholder="example.com">';
+            sugBox.style.display = 'block';
         }
 
+        input.addEventListener('input', () => showSuggestions(input.value.trim()));
+        input.addEventListener('focus', () => { if (!input.value.trim()) showSuggestions(''); });
+
+        sugBox.addEventListener('click', (e) => {
+            const item = e.target.closest('[data-domain]');
+            if (item) {
+                input.value = item.dataset.domain;
+                sugBox.style.display = 'none';
+            }
+        });
+
+        // Hide suggestions on outside click
+        overlay.addEventListener('click', (e) => {
+            if (!e.target.closest('#new-zone-name') && !e.target.closest('#zone-suggestions')) {
+                sugBox.style.display = 'none';
+            }
+        });
+
+        // Hover highlight
+        sugBox.addEventListener('mouseover', (e) => {
+            const item = e.target.closest('[data-domain]');
+            if (item) {
+                sugBox.querySelectorAll('.zone-sug-item').forEach(el => el.style.background = '');
+                item.style.background = 'var(--bg-secondary)';
+            }
+        });
+
         overlay.querySelector('#add-zone-submit').addEventListener('click', async () => {
-            const nameEl = overlay.querySelector('#new-zone-name');
-            const name = nameEl.value.trim();
+            const name = input.value.trim();
             const msg = overlay.querySelector('#add-zone-msg');
             const result = overlay.querySelector('#add-zone-result');
             if (!name) { msg.innerHTML = '<div class="error-message">Select or enter a domain name</div>'; return; }
