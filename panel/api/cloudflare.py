@@ -359,31 +359,25 @@ class CloudflareAPI:
     # ------------------------------------------------------------------
 
     async def list_pages_projects(self) -> dict:
-        """Fetch all Pages projects (auto-paginate)."""
+        """Fetch all Pages projects.
+
+        The Pages API doesn't support standard page/per_page pagination.
+        It returns all projects in a single response (no pagination params).
+        """
+        resp = await self.client.get(
+            f"/accounts/{self.account_id}/pages/projects"
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        results = data.get("result") or []
+
+        # Log result_info so we can see if CF is truncating
         import logging
-        log = logging.getLogger("cloudflare.pages")
-        all_projects = []
-        page = 1
-        while True:
-            resp = await self.client.get(
-                f"/accounts/{self.account_id}/pages/projects",
-                params={"page": page, "per_page": 25},
-            )
-            resp.raise_for_status()
-            data = resp.json()
-            results = data.get("result") or []
-            all_projects.extend(results)
-            info = data.get("result_info") or {}
-            log.info(
-                "Pages page=%d fetched=%d result_info=%s",
-                page, len(results), info,
-            )
-            # Stop if: no more results, or we've fetched all pages
-            total_pages = info.get("total_pages", 1)
-            if not results or page >= total_pages:
-                break
-            page += 1
-        return {"result": all_projects}
+        info = data.get("result_info")
+        logging.getLogger("cloudflare.pages").info(
+            "Fetched %d pages projects, result_info=%s", len(results), info
+        )
+        return data
 
     async def create_pages_project(
         self, name: str, production_branch: str = "main"
