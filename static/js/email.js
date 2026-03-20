@@ -3,30 +3,39 @@
 // ================================================================
 // Shared: parse Migadu DNS response into normalized record array
 // ================================================================
-function parseMigaduDns(data) {
-    // Migadu returns a flat object: {spf: {}, dkim: [], mx_records: [], dmarc: {}, dns_verification: {}}
+function parseMigaduDns(raw) {
+    // Migadu may return nested: {records: {spf: ..., dkim: ...}} or flat: {spf: ..., dkim: ...}
     // Normalize into a flat array with category tags for the checklist.
+    const data = raw.records || raw;
     const records = [];
 
     function add(cat, obj) {
         if (!obj) return;
+        // Handle both {type, name, value} and {type, name, content} shapes
+        const type = (obj.type || '').toUpperCase();
+        const name = obj.name || obj.host || '@';
+        const content = obj.value || obj.content || obj.data || '';
+        if (!content) return;
         records.push({
             category: cat,
-            type: (obj.type || '').toUpperCase(),
-            name: obj.name || '@',
-            content: obj.value || obj.content || '',
+            type: type || (cat === 'mx' ? 'MX' : cat === 'dkim' ? 'CNAME' : 'TXT'),
+            name,
+            content,
             priority: obj.priority != null ? Number(obj.priority) : null,
         });
     }
 
-    // Verification TXT
-    if (data.dns_verification) add('verification', data.dns_verification);
+    // Verification TXT — try multiple key names
+    const verify = data.dns_verification || data.verification || data.verify;
+    if (verify) add('verification', verify);
 
     // MX records (array)
-    (data.mx_records || []).forEach(r => add('mx', r));
+    const mxArr = data.mx_records || data.mx || [];
+    (Array.isArray(mxArr) ? mxArr : [mxArr]).forEach(r => r && add('mx', r));
 
     // DKIM keys (array)
-    (data.dkim || []).forEach(r => add('dkim', r));
+    const dkimArr = data.dkim || data.dkim_records || [];
+    (Array.isArray(dkimArr) ? dkimArr : [dkimArr]).forEach(r => r && add('dkim', r));
 
     // SPF (single object)
     if (data.spf) add('spf', data.spf);
@@ -34,19 +43,11 @@ function parseMigaduDns(data) {
     // DMARC (single object)
     if (data.dmarc) add('dmarc', data.dmarc);
 
-    // Fallback: if none of the known keys exist, try entries/records array
+    // Fallback: if none of the known keys matched, try generic arrays
     if (!records.length) {
         const entries = data.entries || data.records || [];
         if (Array.isArray(entries)) {
-            entries.forEach(r => {
-                records.push({
-                    category: 'other',
-                    type: (r.type || '').toUpperCase(),
-                    name: r.name || '@',
-                    content: r.value || r.content || '',
-                    priority: r.priority != null ? Number(r.priority) : null,
-                });
-            });
+            entries.forEach(r => add('other', r));
         }
     }
 
@@ -767,36 +768,71 @@ const EmailDNS = {
     },
 
     renderDiagnostics(diag) {
-        // Migadu returns: {status: "ok"|"error", checks: {verify: "ok", mx: "error", ...}}
-        const checks = diag.checks || diag.diagnostics;
+        // Migadu diagnostics response can be:
+        //   Flat: {verify: "ok", mx: "error", spf: "ok", dkim: "ok", ...}
+        //   Nested: {status: "error", checks: {verify: "ok", ...}}
+        //   Detailed: {status: "error", checks: {verify: {status: "error", message: "..."}}}
 
-        // Case 1: checks is an object with string values (Migadu's actual format)
+        const meta = {
+            verify:      { label: 'Verification TXT', hint: 'Add the Migadu verification TXT record to your DNS. Use "Add Missing Records to Cloudflare" above.' },
+            nameservers: { label: 'Nameservers',       hint: 'Nameservers must point to Cloudflare. Check the Porkbun domains page.' },
+            spf:         { label: 'SPF Policy',        hint: 'Add or replace the SPF TXT record: v=spf1 include:spf.migadu.com -all' },
+            mx:          { label: 'MX Records',        hint: 'Add MX records: aspmx1.migadu.com (pri 10) and aspmx2.migadu.com (pri 20)' },
+            dkim:        { label: 'DKIM Keys',         hint: 'Add all 3 DKIM CNAME records (key1, key2, key3)._domainkey' },
+            dmarc:       { label: 'DMARC Policy',      hint: 'Add _dmarc TXT record: v=DMARC1; p=quarantine;' },
+        };
+
+        // Normalize: extract checks object from nested or use diag directly
+        let checks = diag.checks || diag.diagnostics || null;
+        if (!checks || (typeof checks !== 'object') || Array.isArray(checks)) {
+            // Maybe the diag object itself has the check keys
+            const checkKeys = ['verify', 'nameservers', 'spf', 'mx', 'dkim', 'dmarc'];
+            if (checkKeys.some(k => k in diag)) {
+                checks = {};
+                for (const k of checkKeys) {
+                    if (k in diag) checks[k] = diag[k];
+                }
+            }
+        }
+
         if (checks && typeof checks === 'object' && !Array.isArray(checks)) {
-            const labels = {
-                verify: 'Verification TXT',
-                nameservers: 'Nameservers',
-                mx: 'MX Records',
-                spf: 'SPF Policy',
-                dkim: 'DKIM Keys',
-                dmarc: 'DMARC Policy',
-            };
             const items = Object.entries(checks).map(([k, v]) => {
-                const isOk = v === 'ok' || v === 'passed' || v === true;
-                const isWarn = v === 'warning';
+                // v can be a string ("ok"/"error") or an object ({status, message})
+                let status, message;
+                if (typeof v === 'object' && v !== null) {
+                    status = v.status || v.state || '';
+                    message = v.message || v.detail || '';
+                } else {
+                    status = String(v);
+                    message = '';
+                }
+
+                const isOk = ['ok', 'passed', 'true'].includes(status.toLowerCase());
+                const isWarn = status.toLowerCase() === 'warning';
                 const cls = isOk ? 'diag-ok' : isWarn ? 'diag-warn' : 'diag-fail';
                 const icon = isOk ? '&#10003;' : isWarn ? '&#9888;' : '&#10007;';
-                const label = labels[k] || k;
-                const status = isOk ? 'OK' : isWarn ? 'Warning' : String(v);
-                return `<li><span class="${cls}">${icon}</span> <strong>${escapeHtml(label)}</strong> — ${escapeHtml(status)}</li>`;
+                const info = meta[k] || { label: k, hint: '' };
+                const statusText = isOk ? 'OK' : isWarn ? 'Warning' : (message || status);
+
+                let html = `<li style="margin-bottom:6px">
+                    <span class="${cls}">${icon}</span>
+                    <strong>${escapeHtml(info.label)}</strong> — ${escapeHtml(statusText)}`;
+                if (!isOk && info.hint) {
+                    html += `<div class="text-muted" style="font-size:10px;margin-left:20px;margin-top:2px">${escapeHtml(info.hint)}</div>`;
+                }
+                html += '</li>';
+                return html;
             }).join('');
 
             const overall = diag.status || '';
-            const overallCls = overall === 'ok' ? 'text-success' : 'text-danger';
-            const header = overall ? `<div class="${overallCls}" style="font-size:12px;margin-bottom:8px;font-weight:600">Overall: ${escapeHtml(overall)}</div>` : '';
+            const overallCls = overall === 'ok' || overall === 'passed' ? 'text-success' : 'text-danger';
+            const header = overall
+                ? `<div class="${overallCls}" style="font-size:12px;margin-bottom:8px;font-weight:600">Overall: ${escapeHtml(overall)}</div>`
+                : '';
             return `${header}<ul class="diag-list">${items}</ul>`;
         }
 
-        // Case 2: checks is an array of objects
+        // Fallback: array of check objects
         if (Array.isArray(checks) && checks.length) {
             const items = checks.map(c => {
                 const ok = c.passed || c.ok || c.status === 'ok';
@@ -804,19 +840,6 @@ const EmailDNS = {
                 const cls = ok ? 'diag-ok' : warn ? 'diag-warn' : 'diag-fail';
                 const icon = ok ? '&#10003;' : warn ? '&#9888;' : '&#10007;';
                 return `<li><span class="${cls}">${icon}</span> ${escapeHtml(c.name || c.type || '')} — ${escapeHtml(c.message || c.detail || (ok ? 'Passed' : 'Failed'))}</li>`;
-            }).join('');
-            return `<ul class="diag-list">${items}</ul>`;
-        }
-
-        // Case 3: flat key-value pairs
-        const keys = Object.keys(diag).filter(k => k !== 'domain' && k !== 'domain_name');
-        if (keys.length) {
-            const items = keys.map(k => {
-                const val = diag[k];
-                const isOk = val === true || val === 'ok' || val === 'passed';
-                const cls = isOk ? 'diag-ok' : 'diag-fail';
-                const icon = isOk ? '&#10003;' : '&#10007;';
-                return `<li><span class="${cls}">${icon}</span> <strong>${escapeHtml(k)}</strong>: ${escapeHtml(String(val))}</li>`;
             }).join('');
             return `<ul class="diag-list">${items}</ul>`;
         }

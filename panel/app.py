@@ -528,10 +528,15 @@ def create_app(config: AppConfig) -> FastAPI:
         if guard:
             return guard
         try:
+            import logging
             initial_delay = min(max(wait, 0), 10)
-            return await mg.get_dns_records(
+            data = await mg.get_dns_records(
                 domain, initial_delay=initial_delay
             )
+            logging.getLogger("migadu").info(
+                "DNS records for %s keys: %s", domain, list(data.keys()) if isinstance(data, dict) else type(data)
+            )
+            return data
         except Exception as e:
             return _mg_error(e)
 
@@ -541,7 +546,12 @@ def create_app(config: AppConfig) -> FastAPI:
         if guard:
             return guard
         try:
-            return await mg.run_diagnostics(domain)
+            import logging
+            diag = await mg.run_diagnostics(domain)
+            logging.getLogger("migadu").info(
+                "Diagnostics for %s: %s", domain, diag
+            )
+            return diag
         except Exception as e:
             return _mg_error(e)
 
@@ -644,8 +654,10 @@ def create_app(config: AppConfig) -> FastAPI:
                 for entry in dns_data.get("entries") or dns_data.get("records") or []:
                     _add(entry)
 
-            # 4. Create all records via the batch function
-            result = await cf.add_dns_records(zone_id, cf_records)
+            # 4. Create all records, replacing conflicts (e.g. old SPF)
+            result = await cf.add_dns_records(
+                zone_id, cf_records, replace_conflicting=True
+            )
             return result
         except Exception as e:
             return _mg_error(e)

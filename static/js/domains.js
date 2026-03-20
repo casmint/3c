@@ -10,7 +10,8 @@ const Domains = {
         content.innerHTML = `
             <div class="page-header">
                 <h1>Domains</h1>
-                <button class="btn btn-accent" id="refresh-domains-btn">Refresh All</button>
+                <a href="https://porkbun.com/account/domainsSpeedy" target="_blank" rel="noopener" class="btn btn-sm" style="margin-left:12px">Open Porkbun ↗</a>
+                <button class="btn btn-accent" id="refresh-domains-btn" style="margin-left:auto">Refresh All</button>
             </div>
             <div class="toolbar">
                 <input type="text" class="search-input" id="domain-search" placeholder="Search domains...">

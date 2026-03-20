@@ -96,30 +96,20 @@ class CloudflareAPI:
         return resp.json()
 
     async def add_dns_records(
-        self, zone_id: str, records: list[dict]
+        self, zone_id: str, records: list[dict],
+        replace_conflicting: bool = False,
     ) -> dict:
-        """Create multiple DNS records in a single call.
-
-        This is a reusable utility designed to be called by any module that
-        needs to provision DNS records programmatically. The primary future
-        consumer is the Migadu email module, which will call this to auto-add
-        MX, SPF (TXT), DKIM (CNAME), and DMARC (TXT) records when a domain
-        is configured for email hosting.
+        """Create multiple DNS records, optionally replacing conflicts.
 
         Each record dict should contain at minimum:
-            type     — record type (A, AAAA, CNAME, MX, TXT, etc.)
-            name     — record name (e.g. "example.com" or "mail.example.com")
-            content  — record value
-        Optional fields:
-            ttl      — TTL in seconds (default: 1 = automatic)
-            proxied  — whether to proxy through Cloudflare (default: false)
-            priority — MX priority (required for MX records)
+            type, name, content
+        Optional: ttl, proxied, priority
 
-        Returns:
-            {
-                "created": [<record objects that succeeded>],
-                "failed":  [{"record": <input>, "error": <message>}]
-            }
+        When replace_conflicting=True, if a record fails due to a conflict
+        (e.g. existing TXT/CNAME at same name), the conflicting record is
+        found and updated in-place rather than failing.
+
+        Returns: {"created": [...], "skipped": [...], "failed": [...]}
         """
         created = []
         skipped = []
@@ -130,32 +120,84 @@ class CloudflareAPI:
                 result = await self.create_dns_record(zone_id, record)
                 created.append(result.get("result", result))
             except httpx.HTTPStatusError as e:
-                # Parse CF error to get human-readable message
                 error_msg = str(e)
-                is_duplicate = False
+                error_code = 0
                 try:
                     body = e.response.json()
                     cf_errors = body.get("errors", [])
                     if cf_errors:
                         error_msg = cf_errors[0].get("message", error_msg)
-                        # 81058 = identical record, 81053 = conflicting record
-                        is_duplicate = any(
-                            err.get("code") in (81058, 81057)
-                            for err in cf_errors
-                        )
+                        error_code = cf_errors[0].get("code", 0)
                 except Exception:
                     pass
-                if is_duplicate:
+
+                # 81058 = identical record already exists — skip
+                if error_code == 81058:
                     skipped.append({"record": record, "message": "Already exists"})
+                # 81053 = conflicting record at same name — try to replace
+                elif error_code == 81053 and replace_conflicting:
+                    replaced = await self._replace_conflicting(
+                        zone_id, record
+                    )
+                    if replaced:
+                        created.append(replaced)
+                    else:
+                        failed.append({"record": record, "error": error_msg})
                 else:
                     failed.append({"record": record, "error": error_msg})
             except Exception as e:
-                failed.append({
-                    "record": record,
-                    "error": str(e),
-                })
+                failed.append({"record": record, "error": str(e)})
 
         return {"created": created, "skipped": skipped, "failed": failed}
+
+    async def _replace_conflicting(
+        self, zone_id: str, record: dict
+    ) -> dict | None:
+        """Find and replace a conflicting DNS record.
+
+        Looks up existing records matching type+name, then updates the first
+        match. For TXT records where there may be multiple (SPF, verification,
+        DMARC), matches on content prefix to find the right one to replace.
+        """
+        rec_type = record.get("type", "").upper()
+        rec_name = record.get("name", "")
+        rec_content = record.get("content", "")
+
+        try:
+            existing = await self.list_dns_records(zone_id, record_type=rec_type)
+            candidates = [
+                r for r in existing.get("result", [])
+                if r.get("name", "").rstrip(".") == rec_name.rstrip(".")
+                or r.get("name", "") == rec_name
+            ]
+
+            if not candidates:
+                # No type match — check if a CNAME is blocking
+                if rec_type in ("TXT", "MX"):
+                    cname_data = await self.list_dns_records(zone_id, record_type="CNAME")
+                    candidates = [
+                        r for r in cname_data.get("result", [])
+                        if r.get("name", "").rstrip(".") == rec_name.rstrip(".")
+                    ]
+
+            if not candidates:
+                return None
+
+            # For TXT records, try to match by content prefix to replace
+            # the right record (e.g. replace old SPF, not verification TXT)
+            target = candidates[0]
+            if rec_type == "TXT" and len(candidates) > 1:
+                prefix = rec_content.split()[0] if rec_content else ""
+                for c in candidates:
+                    existing_prefix = (c.get("content", "").split() or [""])[0]
+                    if prefix and existing_prefix == prefix:
+                        target = c
+                        break
+
+            result = await self.update_dns_record(zone_id, target["id"], record)
+            return result.get("result", result)
+        except Exception:
+            return None
 
     # ------------------------------------------------------------------
     # Analytics (GraphQL)

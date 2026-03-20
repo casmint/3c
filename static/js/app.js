@@ -286,7 +286,8 @@ const Sidebar = {
     emailSubs: [
         { emoji: '🌐', label: 'Domains',   route: '/email/domains',   prefix: '/email/domains' },
         { emoji: '📬', label: 'Mailboxes', route: '/email/mailboxes', prefix: '/email/mailboxes' },
-        { emoji: '🌍', label: 'Webmail',   href: 'https://webmail.migadu.com', external: true },
+        { emoji: '🌍', label: 'Webmail ↗',    href: 'https://webmail.migadu.com', external: true },
+        { emoji: '➡', label: 'Dashboard ↗', href: 'https://admin.migadu.com/domains', external: true },
     ],
 
     render() {
