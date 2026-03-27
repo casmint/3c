@@ -37,6 +37,22 @@ const Zones = {
         }
     },
 
+    pbDomains: null,
+
+    async loadPorkbunDomains() {
+        if (this.pbDomains) return this.pbDomains;
+        try {
+            const pb = await API.get('/api/porkbun/available');
+            if (!pb.available) { this.pbDomains = []; return []; }
+            const domains = await DomainCache.get();
+            this.pbDomains = domains.map(d => d.domain);
+            return this.pbDomains;
+        } catch {
+            this.pbDomains = [];
+            return [];
+        }
+    },
+
     renderTable(zones) {
         if (!zones.length) {
             $('#zones-table-container').innerHTML =
@@ -48,15 +64,22 @@ const Zones = {
             const statusClass = z.status === 'active' ? 'badge-active'
                 : z.status === 'pending' ? 'badge-pending' : 'badge-moved';
             const rowClass = (z.status === 'pending' || z.status === 'moved') ? 'warning-row' : '';
-            const ns = (z.status !== 'active' && z.name_servers)
-                ? `<div class="mono" style="margin-top:4px;font-size:11px">${z.name_servers.join(', ')}</div>` : '';
             const plan = z.plan ? z.plan.name : '—';
+
+            let nsCell = '';
+            if (z.status !== 'active' && z.name_servers) {
+                nsCell = `<div class="mono" style="font-size:11px">${z.name_servers.join(', ')}</div>`;
+                if (z.status === 'pending') {
+                    nsCell += `<button class="btn btn-sm btn-accent fix-ns-btn" data-zone="${escapeHtml(z.name)}" data-ns="${escapeHtml(z.name_servers.join(','))}" style="margin-top:6px">Fix NS</button>
+                        <span class="fix-ns-msg" data-zone-msg="${escapeHtml(z.name)}"></span>`;
+                }
+            }
 
             return `<tr class="${rowClass}">
                 <td><a href="/cf/zones/${z.name}">${escapeHtml(z.name)}</a></td>
                 <td><span class="badge ${statusClass}">${z.status}</span></td>
                 <td class="text-muted">${escapeHtml(plan)}</td>
-                <td>${ns}</td>
+                <td>${nsCell}</td>
             </tr>`;
         }).join('');
 
@@ -67,6 +90,41 @@ const Zones = {
                 </tr></thead>
                 <tbody>${rows}</tbody>
             </table>`;
+
+        // Bind Fix NS buttons
+        $$('.fix-ns-btn').forEach(btn => {
+            btn.addEventListener('click', (e) => {
+                e.preventDefault();
+                this.fixNameservers(btn.dataset.zone, btn.dataset.ns.split(','), btn);
+            });
+        });
+    },
+
+    async fixNameservers(domain, nameservers, btn) {
+        const msg = document.querySelector(`[data-zone-msg="${domain}"]`);
+
+        // Check if domain is on Porkbun
+        const pbDomains = await this.loadPorkbunDomains();
+        if (!pbDomains.includes(domain)) {
+            if (msg) msg.innerHTML = `<span class="text-muted" style="font-size:11px;margin-left:6px">Not on Porkbun — update manually</span>`;
+            return;
+        }
+
+        btn.disabled = true;
+        btn.textContent = 'Updating...';
+
+        try {
+            await API.post(`/api/porkbun/ns/${domain}`, { nameservers });
+            btn.textContent = 'Done';
+            btn.classList.remove('btn-accent');
+            btn.classList.add('btn-success');
+            if (msg) msg.innerHTML = `<span class="text-success" style="font-size:11px;margin-left:6px">NS updated on Porkbun</span>`;
+            DomainCache.invalidate();
+        } catch (e) {
+            btn.disabled = false;
+            btn.textContent = 'Fix NS';
+            if (msg) msg.innerHTML = `<span class="text-danger" style="font-size:11px;margin-left:6px">${escapeHtml(e.message)}</span>`;
+        }
     },
 
     filterZones() {

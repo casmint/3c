@@ -325,6 +325,13 @@ a:hover { text-decoration: underline; }
     color: var(--text-on-danger);
 }
 
+.btn-success {
+    background: transparent;
+    color: var(--success);
+    border-color: var(--success);
+    cursor: default;
+}
+
 .btn-sm {
     padding: 4px 10px;
     font-size: 11px;
