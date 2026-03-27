@@ -80,18 +80,14 @@ const Domains = {
 
         const rows = domains.map(d => {
             const statusBadge = this.statusBadge(d.cf_status);
-            const nsDisplay = d.ns_error
-                ? `Error: ${d.ns_error}`
-                : (d.nameservers || []).join(', ') || '—';
-            const nsClass = d.ns_error ? 'text-danger' : 'text-muted';
             const expiry = this.formatExpiry(d.expire_date);
             const cost = d.renewal_cost ? `$${parseFloat(d.renewal_cost).toFixed(2)}/yr` : '—';
 
             const actions = [];
-            if (d.cf_status === 'cf_pending' || d.cf_status === 'not_on_cf') {
-                if (d.cf_status === 'cf_pending') {
-                    actions.push(`<button class="btn btn-sm btn-accent" data-fix-cf="${d.domain}">Fix NS</button>`);
-                }
+            if (d.cf_status === 'cf_pending') {
+                actions.push(`<button class="btn btn-sm btn-accent" data-fix-cf="${d.domain}">Fix NS</button>`);
+            } else if (d.cf_status === 'not_on_cf') {
+                actions.push(`<button class="btn btn-sm btn-accent" data-add-zone="${d.domain}">Add Zone</button>`);
             }
             actions.push(`<button class="btn btn-sm" data-edit-ns="${d.domain}">Edit NS</button>`);
 
@@ -99,7 +95,6 @@ const Domains = {
                 <td><strong>${escapeHtml(d.domain)}</strong></td>
                 <td><span class="text-muted">.${escapeHtml(d.tld)}</span></td>
                 <td>${statusBadge}</td>
-                <td class="${nsClass} mono" style="font-size:11px" title="${escapeHtml(nsDisplay)}">${escapeHtml(this.truncateNs(nsDisplay))}</td>
                 <td class="${expiry.warn ? 'text-danger' : ''}">${expiry.text}</td>
                 <td>${cost}</td>
                 <td class="actions">${actions.join(' ')}</td>
@@ -109,7 +104,7 @@ const Domains = {
         container.innerHTML = `
             <table class="data-table">
                 <thead><tr>
-                    <th>Domain</th><th>TLD</th><th>Status</th><th>Nameservers</th><th>Expires</th><th>Renewal</th><th>Actions</th>
+                    <th>Domain</th><th>TLD</th><th>Status</th><th>Expires</th><th>Renewal</th><th>Actions</th>
                 </tr></thead>
                 <tbody>${rows}</tbody>
             </table>`;
@@ -117,6 +112,9 @@ const Domains = {
         // Bind action buttons
         container.querySelectorAll('[data-fix-cf]').forEach(btn => {
             btn.addEventListener('click', () => this.showFixCfModal(btn.dataset.fixCf));
+        });
+        container.querySelectorAll('[data-add-zone]').forEach(btn => {
+            btn.addEventListener('click', () => this.addZoneAndFixNs(btn.dataset.addZone, btn));
         });
         container.querySelectorAll('[data-edit-ns]').forEach(btn => {
             btn.addEventListener('click', () => this.showEditNsModal(btn.dataset.editNs));
@@ -130,7 +128,7 @@ const Domains = {
             case 'cf_pending':
                 return '<span class="badge badge-pending">PENDING</span>';
             default:
-                return '<span class="badge badge-moved">NOT ON CF</span>';
+                return '<span class="badge badge-neutral">NOT ON CF</span>';
         }
     },
 
@@ -142,10 +140,6 @@ const Domains = {
         const daysLeft = Math.floor((d - now) / (1000 * 60 * 60 * 24));
         const text = d.toLocaleDateString('en-US', { year: 'numeric', month: 'short', day: 'numeric' });
         return { text, warn: daysLeft < 30 };
-    },
-
-    truncateNs(ns) {
-        return ns.length > 50 ? ns.substring(0, 47) + '...' : ns;
     },
 
     bindEvents() {
@@ -167,21 +161,64 @@ const Domains = {
         });
     },
 
+    // Add Zone on CF + update NS on Porkbun in one flow
+    async addZoneAndFixNs(domain, btn) {
+        const row = btn.closest('tr');
+        const msgSpan = document.createElement('span');
+        msgSpan.style.cssText = 'font-size:11px;margin-left:8px';
+        btn.parentElement.appendChild(msgSpan);
+
+        btn.disabled = true;
+        btn.textContent = 'Creating...';
+
+        try {
+            // Step 1: Create zone on CF
+            const data = await API.post('/api/cf/zones', { name: domain });
+            const zone = data.result;
+            const ns = zone.name_servers || [];
+
+            btn.textContent = 'Updating NS...';
+
+            // Step 2: Update NS on Porkbun
+            try {
+                await API.post(`/api/porkbun/ns/${domain}`, { nameservers: ns });
+                btn.textContent = 'Done';
+                btn.classList.remove('btn-accent');
+                btn.classList.add('btn-success');
+                btn.disabled = true;
+                msgSpan.className = 'text-success';
+                msgSpan.textContent = `NS → ${ns.join(', ')}`;
+                DomainCache.invalidate();
+                ZoneCache.invalidate();
+            } catch (nsErr) {
+                // Zone created but NS update failed
+                btn.textContent = 'Zone Added';
+                btn.classList.remove('btn-accent');
+                btn.classList.add('btn-success');
+                btn.disabled = true;
+                msgSpan.className = 'text-warning';
+                msgSpan.textContent = `NS update failed: ${nsErr.message}`;
+                DomainCache.invalidate();
+                ZoneCache.invalidate();
+            }
+        } catch (err) {
+            btn.disabled = false;
+            btn.textContent = 'Add Zone';
+            msgSpan.className = 'text-danger';
+            msgSpan.textContent = err.message;
+        }
+    },
+
     showFixCfModal(domain) {
         const d = this.allDomains.find(x => x.domain === domain);
         if (!d) return;
 
-        const currentNs = (d.nameservers || []).join('\n') || '(none)';
         const cfNs = (d.cf_nameservers || []).join('\n') || '(unknown)';
 
         const overlay = showModal(`
             <button class="modal-close">&times;</button>
             <h2>Fix Nameservers</h2>
-            <p>Update <strong>${escapeHtml(domain)}</strong> to use Cloudflare nameservers?</p>
-            <div class="form-group">
-                <label>Current nameservers</label>
-                <div class="info-message mono" style="font-size:12px;white-space:pre-line">${escapeHtml(currentNs)}</div>
-            </div>
+            <p>Update <strong>${escapeHtml(domain)}</strong> to use Cloudflare nameservers on Porkbun?</p>
             <div class="form-group">
                 <label>Cloudflare assigned nameservers</label>
                 <div class="info-message mono" style="font-size:12px;white-space:pre-line;border-color:var(--accent)">${escapeHtml(cfNs)}</div>
@@ -199,7 +236,7 @@ const Domains = {
             btn.disabled = true;
 
             try {
-                await API.post(`/api/domains/${domain}/fix-cf`);
+                await API.post(`/api/porkbun/ns/${domain}`, { nameservers: d.cf_nameservers });
                 msg.innerHTML = '<div class="success-message">Nameservers updated on Porkbun!</div>';
                 DomainCache.invalidate();
                 setTimeout(() => {
@@ -216,7 +253,8 @@ const Domains = {
     showEditNsModal(domain) {
         const d = this.allDomains.find(x => x.domain === domain);
         if (!d) return;
-        const ns = d.nameservers || [];
+        // Pre-fill with CF nameservers if available, otherwise empty
+        const ns = d.cf_nameservers && d.cf_nameservers.length ? d.cf_nameservers : [];
 
         const overlay = showModal(`
             <button class="modal-close">&times;</button>
@@ -251,7 +289,7 @@ const Domains = {
             btn.disabled = true;
 
             try {
-                await API.post(`/api/domains/${domain}/update-ns`, { nameservers: [ns1, ns2] });
+                await API.post(`/api/porkbun/ns/${domain}`, { nameservers: [ns1, ns2] });
                 msg.innerHTML = '<div class="success-message">Nameservers updated!</div>';
                 DomainCache.invalidate();
                 setTimeout(() => {

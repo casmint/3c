@@ -377,7 +377,7 @@ def create_app(config: AppConfig) -> FastAPI:
 
     @app.get("/api/domains")
     async def api_list_domains():
-        """List all Porkbun domains with NS status and CF comparison."""
+        """List all Porkbun domains with CF zone status (no per-domain NS fetch)."""
         guard = _pb_guard()
         if guard:
             return guard
@@ -388,31 +388,28 @@ def create_app(config: AppConfig) -> FastAPI:
                 pb.get_pricing(),
             )
 
-            # Fetch all CF zones once
+            # Fetch all CF zones once — this is the only external call needed
             try:
                 cf_data = await cf.list_zones(per_page=50)
                 cf_zones = {z["name"]: z for z in cf_data.get("result", [])}
             except Exception:
                 cf_zones = {}
 
-            # Fetch nameservers for each domain concurrently
-            async def enrich(d):
+            results = []
+            for d in domains:
                 domain_name = d.get("domain", "")
-                ns_result = await pb.get_nameservers(domain_name)
-                ns = ns_result["ns"]
-                ns_error = ns_result["error"]
 
-                # Determine TLD and pricing
+                # TLD and pricing
                 tld = domain_name.split(".", 1)[1] if "." in domain_name else ""
                 tld_pricing = pricing.get(tld, {})
                 renewal_cost = tld_pricing.get("renewal") or tld_pricing.get("renew")
 
-                # CF status
+                # CF status — derived entirely from CF zone data
                 cf_zone = cf_zones.get(domain_name)
                 if cf_zone:
                     cf_ns = sorted(cf_zone.get("name_servers") or [])
-                    current_ns = sorted(ns)
-                    if current_ns == cf_ns:
+                    zone_status = cf_zone.get("status", "")
+                    if zone_status == "active":
                         cf_status = "cf_active"
                     else:
                         cf_status = "cf_pending"
@@ -420,30 +417,19 @@ def create_app(config: AppConfig) -> FastAPI:
                     cf_ns = []
                     cf_status = "not_on_cf"
 
-                return {
+                results.append({
                     "domain": domain_name,
                     "tld": tld,
                     "status": d.get("status", ""),
                     "expire_date": d.get("expireDate", ""),
                     "auto_renew": d.get("autoRenew", False),
                     "not_local": d.get("notLocal", 0),
-                    "nameservers": ns,
-                    "ns_error": ns_error,
                     "cf_status": cf_status,
                     "cf_nameservers": cf_ns,
                     "renewal_cost": renewal_cost,
-                }
+                })
 
-            results = await asyncio.gather(
-                *[enrich(d) for d in domains],
-                return_exceptions=True,
-            )
-            # Filter out any failed enrichments
-            return {
-                "domains": [
-                    r for r in results if isinstance(r, dict)
-                ]
-            }
+            return {"domains": results}
         except Exception as e:
             return _pb_error(e)
 

@@ -417,6 +417,7 @@ a:hover { text-decoration: underline; }
 .badge-active  { color: var(--success); border-color: var(--success); }
 .badge-pending { color: var(--warning); border-color: var(--warning); }
 .badge-moved   { color: var(--danger);  border-color: var(--danger); }
+.badge-neutral { color: var(--text-muted); border-color: var(--text-muted); }
 .badge-free    { color: var(--text-muted); border-color: var(--text-muted); }
 
 /* Deployment statuses */
