@@ -7,6 +7,8 @@ Migadu, and a server console.
 Runs at `3c.lol`. Protected by Cloudflare Access (Google OAuth). No login
 code in the app itself.
 
+NOTE: This is the new version of the "c3" repo, formerly named wrong
+
 ## Features
 
 - **Zone management** — list, search, filter, and add Cloudflare zones
