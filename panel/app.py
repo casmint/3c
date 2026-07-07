@@ -816,128 +816,84 @@ def create_app(config: AppConfig) -> FastAPI:
             return _mg_error(e)
 
     # ------------------------------------------------------------------
-    # Apps — registry
+    # Apps — unified dashboard (filesystem is the registry: every
+    # apps/{name}/docker-compose.yml is an app; root docker-compose.yml
+    # services are core/shared)
     # ------------------------------------------------------------------
 
     from panel.api import apps as apps_mod
 
     @app.get("/api/apps")
     async def api_list_apps():
-        """List all apps from registry with their container status."""
-        app_list = apps_mod.load_apps()
-        result = []
-        for a in app_list:
-            try:
-                containers = apps_mod.get_app_containers(a["name"])
-                running = any(c["running"] for c in containers)
-            except Exception:
-                containers = []
-                running = False
-            result.append({**a, "containers": containers, "running": running})
-        return {"apps": result}
+        root = apps_mod.discover_root_services()
+        apps_list = apps_mod.discover_apps()
+        known_names = {c["name"] for c in root["core"]} | {c["name"] for c in root["shared"]}
+        for a in apps_list:
+            known_names.update(c["name"] for c in a["containers"])
+        other = apps_mod.discover_other_containers(known_names)
+        return {"core": root["core"], "shared": root["shared"], "apps": apps_list, "other": other}
 
-    @app.post("/api/apps/registry/add")
+    @app.get("/api/stats")
+    async def api_stats():
+        """Live mem/cpu per container — fetched separately since `docker stats`
+        takes ~2s to sample regardless of container count."""
+        return {"stats": apps_mod.get_docker_stats()}
+
+    @app.post("/api/apps")
     async def api_add_app(request: Request):
-        try:
-            body = await request.json()
-            app_entry = apps_mod.add_app(
-                name=body["name"],
-                app_type=body.get("type", "stack"),
-                repo=body.get("repo"),
-                branch=body.get("branch", "main"),
-                domain=body.get("domain"),
-                port=body.get("port", 8000),
-                env_vars=body.get("env_vars", {}),
-            )
-            return {"success": True, "app": app_entry}
-        except ValueError as e:
-            return JSONResponse(status_code=409, content={"error": str(e)})
-        except Exception as e:
-            return JSONResponse(status_code=500, content={"error": str(e)})
-
-    @app.post("/api/apps/registry/remove/{name}")
-    async def api_remove_app(name: str):
-        apps_mod.remove_app(name)
-        return {"success": True}
-
-    # ------------------------------------------------------------------
-    # Apps — operations
-    # ------------------------------------------------------------------
+        body = await request.json()
+        name = (body.get("name") or "").strip()
+        repo = (body.get("repo") or "").strip()
+        branch = (body.get("branch") or "main").strip()
+        if not name or not repo:
+            return JSONResponse(status_code=400, content={"error": "name and repo are required"})
+        ok, msg = apps_mod.clone_app(name, repo, branch)
+        return {"success": ok, "message": msg}
 
     @app.post("/api/apps/{name}/deploy")
     async def api_deploy_app(name: str):
-        a = apps_mod.get_app(name)
-        if not a:
-            return JSONResponse(status_code=404, content={"error": f"App not found: {name}"})
-        results = apps_mod.full_deploy(a)
-        steps = [{"step": s, "success": ok, "message": msg} for s, ok, msg in results]
-        success = all(s["success"] for s in steps)
-        return {"success": success, "steps": steps}
+        ok, msg = apps_mod.deploy_app(name)
+        return {"success": ok, "message": msg}
 
     @app.post("/api/apps/{name}/pull-restart")
     async def api_pull_restart_app(name: str):
-        a = apps_mod.get_app(name)
-        if not a:
-            return JSONResponse(status_code=404, content={"error": f"App not found: {name}"})
-        results = apps_mod.pull_and_restart(a)
+        results = apps_mod.pull_and_restart(name)
         steps = [{"step": s, "success": ok, "message": msg} for s, ok, msg in results]
         success = all(s["success"] for s in steps)
         return {"success": success, "steps": steps}
 
+    @app.post("/api/apps/{name}/start")
+    async def api_start_app(name: str):
+        ok, msg = apps_mod.start_app(name)
+        return {"success": ok, "message": msg}
+
     @app.post("/api/apps/{name}/stop")
     async def api_stop_app(name: str):
-        a = apps_mod.get_app(name)
-        if not a:
-            return JSONResponse(status_code=404, content={"error": f"App not found: {name}"})
-        ok, msg = apps_mod.stop_app(a)
+        ok, msg = apps_mod.stop_app(name)
         return {"success": ok, "message": msg}
 
     @app.post("/api/apps/{name}/restart")
     async def api_restart_app(name: str):
-        a = apps_mod.get_app(name)
-        if not a:
-            return JSONResponse(status_code=404, content={"error": f"App not found: {name}"})
-        ok, msg = apps_mod.restart_app(a)
+        ok, msg = apps_mod.restart_app(name)
         return {"success": ok, "message": msg}
 
     @app.post("/api/apps/{name}/delete")
     async def api_delete_app(name: str):
-        a = apps_mod.get_app(name)
-        if not a:
-            return JSONResponse(status_code=404, content={"error": f"App not found: {name}"})
-        ok, msg = apps_mod.delete_app_containers(a)
-        apps_mod.remove_app(name)
+        ok, msg = apps_mod.delete_app(name)
         return {"success": ok, "message": msg}
 
     @app.get("/api/apps/{name}/logs")
     async def api_app_logs(name: str, tail: int = 200):
-        a = apps_mod.get_app(name)
-        if not a:
-            return JSONResponse(status_code=404, content={"error": f"App not found: {name}"})
-        # Get logs from all containers belonging to this app
-        containers = apps_mod.get_app_containers(name)
-        if not containers:
-            return {"logs": "No containers found for this app."}
-        logs_parts = []
-        for c in containers:
-            log = apps_mod.get_container_logs(c["name"], tail=tail)
-            if len(containers) > 1:
-                logs_parts.append(f"=== {c['name']} ===\n{log}")
-            else:
-                logs_parts.append(log)
-        return {"logs": "\n".join(logs_parts)}
+        return {"logs": apps_mod.get_app_logs(name, tail=tail)}
 
     @app.get("/api/apps/{name}/git-status")
     async def api_app_git_status(name: str):
         return apps_mod.get_git_status(name)
 
     # ------------------------------------------------------------------
-    # Raw Containers
+    # Raw container actions (core / shared services — single containers,
+    # not compose projects, so plain docker start/stop/restart applies)
     # ------------------------------------------------------------------
-
-    @app.get("/api/containers")
-    async def api_list_containers():
-        return {"containers": apps_mod.list_all_containers()}
 
     @app.post("/api/containers/{name}/start")
     async def api_start_container(name: str):

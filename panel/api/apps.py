@@ -1,8 +1,9 @@
-"""App management: registry, git ops, build, deploy, logs, self-update.
+"""App & container discovery/management.
 
-Adapted from the C3 reference implementation. Uses subprocess for all
-Docker operations (both compose and single-container) since the panel
-container mounts the Docker binary and socket directly.
+The filesystem is the registry: every subdirectory of apps/ with its own
+docker-compose.yml is an app. Core/shared services are read directly from
+the root docker-compose.yml's own compose project (no apps.json — a
+registry file can drift from reality; the filesystem can't).
 """
 
 import json
@@ -11,16 +12,21 @@ import re
 import shutil
 import subprocess
 from pathlib import Path
-from typing import Literal
 
-# Paths — /app is the working directory inside the container
 BASE_DIR = Path(os.environ.get("APP_BASE_DIR", Path(__file__).resolve().parent.parent.parent))
-APPS_FILE = BASE_DIR / "apps.json"
 APPS_DIR = BASE_DIR / "apps"
-GENERATED_DIR = BASE_DIR / "generated"
-
 NETWORK = "3c-network"
-CONTAINER_PREFIX = "3c"
+
+# docker compose infers the project name from the current directory's basename.
+# Inside the panel container BASE_DIR is /app, but the root stack was actually
+# brought up from /home/ubuntu/3c on the host — so project-scoped commands
+# against the root compose file must pin the name explicitly or they'll
+# silently match zero containers.
+ROOT_PROJECT = "3c"
+
+# Services defined in the root docker-compose.yml that ARE the platform itself.
+# Everything else in the root compose (e.g. ollama) is a shared service apps consume.
+CORE_SERVICES = {"panel", "traefik", "cloudflared"}
 
 
 def _get_github_token() -> str:
@@ -28,7 +34,6 @@ def _get_github_token() -> str:
 
 
 def _inject_github_token(repo_url: str) -> str:
-    """Inject GitHub token into HTTPS repo URL for private repo access."""
     token = _get_github_token()
     if not token:
         return repo_url
@@ -38,7 +43,6 @@ def _inject_github_token(repo_url: str) -> str:
 
 
 def _redact_token(text: str) -> str:
-    """Strip token from any error messages before returning to client."""
     token = _get_github_token()
     if token:
         return text.replace(token, "***")
@@ -46,205 +50,377 @@ def _redact_token(text: str) -> str:
 
 
 # ================================================================
-# App Registry (apps.json)
-# ================================================================
-
-AppType = Literal["web", "worker", "stack"]
-
-
-def load_apps() -> list[dict]:
-    if not APPS_FILE.exists():
-        return []
-    with open(APPS_FILE) as f:
-        data = json.load(f)
-    return data.get("apps", []) if isinstance(data, dict) else data
-
-
-def save_apps(apps: list[dict]) -> None:
-    with open(APPS_FILE, "w") as f:
-        json.dump({"apps": apps}, f, indent=2)
-
-
-def get_app(name: str) -> dict | None:
-    for app in load_apps():
-        if app["name"] == name:
-            return app
-    return None
-
-
-def add_app(
-    name: str,
-    app_type: AppType,
-    repo: str | None = None,
-    branch: str = "main",
-    domain: str | None = None,
-    port: int = 8000,
-    env_vars: dict | None = None,
-) -> dict:
-    apps = load_apps()
-    if any(a["name"] == name for a in apps):
-        raise ValueError(f"App '{name}' already exists")
-
-    app = {
-        "name": name,
-        "type": app_type,
-        "repo": repo,
-        "branch": branch,
-        "domain": domain,
-        "port": port,
-        "env_vars": env_vars or {},
-        "enabled": True,
-    }
-    apps.append(app)
-    save_apps(apps)
-    return app
-
-
-def remove_app(name: str) -> bool:
-    apps = load_apps()
-    apps = [a for a in apps if a["name"] != name]
-    save_apps(apps)
-    return True
-
-
-def get_app_path(app: dict | str) -> Path:
-    name = app["name"] if isinstance(app, dict) else app
-    return APPS_DIR / name
-
-
-# ================================================================
-# Docker helpers (subprocess-based)
+# Low-level docker / compose helpers
 # ================================================================
 
 def _docker(*args: str, timeout: int = 30) -> subprocess.CompletedProcess:
-    """Run a docker CLI command. Returns a failed result if docker is not available."""
     try:
-        return subprocess.run(
-            ["docker", *args],
-            capture_output=True, text=True, timeout=timeout,
-        )
+        return subprocess.run(["docker", *args], capture_output=True, text=True, timeout=timeout)
     except FileNotFoundError:
-        return subprocess.CompletedProcess(
-            args=["docker", *args], returncode=1,
-            stdout="", stderr="docker not found",
-        )
+        return subprocess.CompletedProcess(args=["docker", *args], returncode=1, stdout="", stderr="docker not found")
+    except subprocess.TimeoutExpired:
+        return subprocess.CompletedProcess(args=["docker", *args], returncode=1, stdout="", stderr="timed out")
 
 
 def _compose(*args: str, cwd: str | Path, timeout: int = 300) -> subprocess.CompletedProcess:
-    """Run a docker compose command in a directory."""
-    return subprocess.run(
-        ["docker", "compose", *args],
-        cwd=str(cwd),
-        capture_output=True, text=True, timeout=timeout,
-    )
-
-
-def get_container_status(name: str) -> dict | None:
-    """Get container status by name. Returns None if not found."""
-    r = _docker("inspect", "--format",
-                '{"status":"{{.State.Status}}","running":{{.State.Running}}}',
-                name, timeout=10)
-    if r.returncode != 0:
-        return None
     try:
-        return json.loads(r.stdout.strip())
-    except json.JSONDecodeError:
-        return None
+        return subprocess.run(["docker", "compose", *args], cwd=str(cwd), capture_output=True, text=True, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        return subprocess.CompletedProcess(args=["docker", "compose", *args], returncode=1, stdout="", stderr="timed out")
 
 
-def list_network_containers() -> list[dict]:
-    """List all containers on the 3c-network."""
-    r = _docker("network", "inspect", NETWORK,
-                "--format", "{{range .Containers}}{{.Name}} {{end}}",
-                timeout=10)
+def _parse_ndjson(text: str) -> list[dict]:
+    items = []
+    for line in text.strip().split("\n"):
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            items.append(json.loads(line))
+        except json.JSONDecodeError:
+            continue
+    return items
+
+
+def _compose_ps(cwd: str | Path) -> list[dict]:
+    r = _compose("ps", "-a", "--format", "json", cwd=cwd, timeout=15)
     if r.returncode != 0:
         return []
-    names = r.stdout.strip().split()
-    result = []
-    for name in names:
-        info = get_container_status(name)
-        if info:
-            info["name"] = name
-            result.append(info)
-    return result
+    return _parse_ndjson(r.stdout)
+
+
+def _compose_config(cwd: str | Path) -> dict:
+    r = _compose("config", "--format", "json", cwd=cwd, timeout=15)
+    if r.returncode != 0:
+        return {}
+    try:
+        return json.loads(r.stdout)
+    except json.JSONDecodeError:
+        return {}
+
+
+_HOST_RULE_RE = re.compile(r"Host\(`([^`]+)`\)")
+
+
+def _extract_routing(labels: dict) -> tuple[str | None, str | None]:
+    """Pull the first Host() domain and load-balancer port out of Traefik labels."""
+    domain = None
+    port = None
+    for k, v in labels.items():
+        if domain is None:
+            m = _HOST_RULE_RE.search(str(v))
+            if m:
+                domain = m.group(1)
+        if port is None and k.endswith(".loadbalancer.server.port"):
+            port = str(v)
+    return domain, port
 
 
 def get_container_logs(name: str, tail: int = 200) -> str:
-    """Get last N lines of container logs."""
-    # For stack apps, try the project name pattern
     r = _docker("logs", "--tail", str(tail), "--timestamps", name, timeout=15)
     if r.returncode != 0:
         return r.stderr or f"Failed to get logs for {name}"
     return r.stdout + r.stderr  # docker logs sends some output to stderr
 
 
-def get_app_containers(app_name: str) -> list[dict]:
-    """Find all running containers that belong to an app.
+# ================================================================
+# Live resource stats (fetched separately — `docker stats` takes ~2s
+# to sample regardless of container count, so this is its own
+# endpoint the frontend loads after the initial page paint)
+# ================================================================
 
-    Matches containers named: {app_name}, {app_name}-*, {app_name}_*
-    These patterns cover both single-container and docker-compose services.
-    """
-    r = _docker("ps", "-a", "--format", "{{.Names}}\t{{.Status}}\t{{.State}}", timeout=10)
+def get_docker_stats() -> dict[str, dict]:
+    r = _docker("stats", "--no-stream", "--format", "json", timeout=15)
     if r.returncode != 0:
-        return []
-    containers = []
-    for line in r.stdout.strip().split("\n"):
-        if not line.strip():
+        return {}
+    stats = {}
+    for item in _parse_ndjson(r.stdout):
+        name = item.get("Name")
+        if not name:
             continue
-        parts = line.split("\t")
-        if len(parts) < 3:
-            continue
-        cname, status_text, state = parts[0], parts[1], parts[2]
-        if (cname == app_name
-                or cname.startswith(f"{app_name}-")
-                or cname.startswith(f"{app_name}_")):
-            containers.append({
-                "name": cname,
-                "status_text": status_text,
-                "running": state == "running",
-            })
-    return containers
+        stats[name] = {
+            "mem_usage": item.get("MemUsage", ""),
+            "mem_pct": item.get("MemPerc", ""),
+            "cpu_pct": item.get("CPUPerc", ""),
+        }
+    return stats
 
 
 # ================================================================
-# Raw Container Management
+# Root services (core + shared)
 # ================================================================
 
-def list_all_containers() -> list[dict]:
-    """List all containers on the host with their status."""
-    r = _docker(
-        "ps", "-a", "--format",
-        "{{.Names}}\t{{.Image}}\t{{.Status}}\t{{.State}}\t{{.Networks}}",
-        timeout=10,
-    )
+def discover_root_services() -> dict:
+    """Classify every service in the root docker-compose.yml as core or shared."""
+    r = _compose("-p", ROOT_PROJECT, "ps", "-a", "--format", "json", cwd=BASE_DIR, timeout=15)
+    ps = _parse_ndjson(r.stdout) if r.returncode == 0 else []
+    core, shared = [], []
+    for c in ps:
+        service = c.get("Service", "")
+        entry = {
+            "name": c.get("Name", ""),
+            "service": service,
+            "image": c.get("Image", ""),
+            "status_text": c.get("Status", ""),
+            "running": c.get("State") == "running",
+        }
+        (core if service in CORE_SERVICES else shared).append(entry)
+    return {"core": core, "shared": shared}
+
+
+def discover_other_containers(known_names: set[str]) -> list[dict]:
+    """Anything running on the host that isn't a core/shared/app container."""
+    r = _docker("ps", "-a", "--format", "json", timeout=15)
     if r.returncode != 0:
         return []
-    containers = []
-    for line in r.stdout.strip().split("\n"):
-        if not line.strip():
+    out = []
+    for c in _parse_ndjson(r.stdout):
+        name = c.get("Names", "")
+        if not name or name in known_names:
             continue
-        parts = line.split("\t")
-        if len(parts) < 5:
-            continue
-        name, image, status_text, state, networks = parts
-        on_network = NETWORK in networks
-        # Categorize
-        if name in ("traefik", "3c-tunnel", "3c-panel"):
-            group = "core"
-        elif name.startswith("3c-") or on_network:
-            group = "app"
-        else:
-            group = "other"
-        containers.append({
+        out.append({
             "name": name,
-            "image": image,
-            "status_text": status_text,
-            "running": state == "running",
-            "on_network": on_network,
-            "group": group,
+            "image": c.get("Image", ""),
+            "status_text": c.get("Status", ""),
+            "running": c.get("State") == "running",
         })
-    return containers
+    return out
 
+
+# ================================================================
+# Git status (used by both apps and 3c self)
+# ================================================================
+
+def _git_status(repo_dir: Path) -> dict:
+    if not (repo_dir / ".git").exists():
+        return {"is_repo": False}
+
+    result = {"is_repo": True, "branch": "", "last_commit": "", "dirty": False, "ahead": 0, "behind": 0, "remote": ""}
+    try:
+        subprocess.run(["git", "fetch"], cwd=str(repo_dir), capture_output=True, timeout=10)
+    except Exception:
+        pass
+    try:
+        r = subprocess.run(["git", "branch", "--show-current"], cwd=str(repo_dir), capture_output=True, text=True, timeout=5)
+        result["branch"] = r.stdout.strip()
+
+        r = subprocess.run(["git", "log", "-1", "--format=%h %s"], cwd=str(repo_dir), capture_output=True, text=True, timeout=5)
+        result["last_commit"] = r.stdout.strip()
+
+        r = subprocess.run(["git", "status", "--porcelain"], cwd=str(repo_dir), capture_output=True, text=True, timeout=5)
+        result["dirty"] = len(r.stdout.strip()) > 0
+
+        r = subprocess.run(["git", "rev-list", "--left-right", "--count", "HEAD...@{u}"], cwd=str(repo_dir), capture_output=True, text=True, timeout=5)
+        if r.returncode == 0 and r.stdout.strip():
+            parts = r.stdout.strip().split()
+            if len(parts) >= 2:
+                result["ahead"] = int(parts[0])
+                result["behind"] = int(parts[1])
+
+        r = subprocess.run(["git", "remote", "get-url", "origin"], cwd=str(repo_dir), capture_output=True, text=True, timeout=5)
+        if r.returncode == 0:
+            result["remote"] = _redact_token(r.stdout.strip())
+    except Exception as e:
+        result["error"] = str(e)
+    return result
+
+
+def get_git_status(app_name: str) -> dict:
+    app_dir = APPS_DIR / app_name
+    if not app_dir.exists():
+        return {"error": "App folder not found"}
+    status = _git_status(app_dir)
+    if not status.get("is_repo"):
+        return {"error": "Not a git repo"}
+    return status
+
+
+def get_3c_git_status() -> dict:
+    return _git_status(BASE_DIR)
+
+
+# ================================================================
+# App discovery (apps/ dir is the registry)
+# ================================================================
+
+def _compose_file(app_dir: Path) -> Path | None:
+    for candidate in ("docker-compose.yml", "docker-compose.yaml", "compose.yml", "compose.yaml"):
+        p = app_dir / candidate
+        if p.exists():
+            return p
+    return None
+
+
+def list_app_names() -> list[str]:
+    if not APPS_DIR.exists():
+        return []
+    return sorted(
+        d.name for d in APPS_DIR.iterdir()
+        if d.is_dir() and _compose_file(d) is not None
+    )
+
+
+def _app_dir(name: str) -> Path:
+    return APPS_DIR / name
+
+
+def _discover_app(name: str) -> dict:
+    app_dir = _app_dir(name)
+    ps = _compose_ps(app_dir)
+    config = _compose_config(app_dir)
+    services_cfg = config.get("services", {}) if config else {}
+
+    domain = None
+    port = None
+    uses_ollama = False
+    for svc in services_cfg.values():
+        labels = svc.get("labels") or {}
+        d, p = _extract_routing(labels)
+        domain = domain or d
+        port = port or p
+        env = svc.get("environment") or {}
+        if any("OLLAMA" in k.upper() for k in env):
+            uses_ollama = True
+
+    containers = [{
+        "name": c.get("Name", ""),
+        "service": c.get("Service", ""),
+        "image": c.get("Image", ""),
+        "status_text": c.get("Status", ""),
+        "running": c.get("State") == "running",
+    } for c in ps]
+
+    if not containers:
+        status = "not_deployed"
+    elif all(c["running"] for c in containers):
+        status = "running"
+    elif any(c["running"] for c in containers):
+        status = "partial"
+    else:
+        status = "stopped"
+
+    return {
+        "name": name,
+        "domain": domain,
+        "port": port,
+        "uses_ollama": uses_ollama,
+        "status": status,
+        "running": status in ("running", "partial"),
+        "containers": containers,
+        "git": _git_status(app_dir),
+    }
+
+
+def discover_apps() -> list[dict]:
+    return [_discover_app(name) for name in list_app_names()]
+
+
+# ================================================================
+# App actions (compose-based — correct for both single- and
+# multi-container apps)
+# ================================================================
+
+def start_app(name: str) -> tuple[bool, str]:
+    r = _compose("start", cwd=_app_dir(name), timeout=60)
+    if r.returncode != 0:
+        return False, r.stderr or "Failed to start"
+    return True, "Started"
+
+
+def stop_app(name: str) -> tuple[bool, str]:
+    r = _compose("stop", cwd=_app_dir(name), timeout=60)
+    if r.returncode != 0:
+        return False, r.stderr or "Failed to stop"
+    return True, "Stopped"
+
+
+def restart_app(name: str) -> tuple[bool, str]:
+    r = _compose("restart", cwd=_app_dir(name), timeout=60)
+    if r.returncode != 0:
+        return False, r.stderr or "Failed to restart"
+    return True, "Restarted"
+
+
+def deploy_app(name: str) -> tuple[bool, str]:
+    """Rebuild image(s) and (re)start — docker compose up -d --build."""
+    r = _compose("up", "-d", "--build", cwd=_app_dir(name), timeout=300)
+    if r.returncode != 0:
+        return False, r.stderr[-1000:] if len(r.stderr) > 1000 else r.stderr
+    return True, "Deployed"
+
+
+def pull_and_restart(name: str) -> list[tuple[str, bool, str]]:
+    """git pull -> rebuild -> redeploy."""
+    app_dir = _app_dir(name)
+    results = []
+    try:
+        r = subprocess.run(["git", "pull"], cwd=str(app_dir), capture_output=True, text=True, timeout=60)
+        ok = r.returncode == 0
+        msg = _redact_token(r.stdout.strip() or r.stderr.strip() or ("Already up to date" if ok else "Pull failed"))
+        results.append(("pull", ok, msg))
+        if not ok:
+            return results
+    except Exception as e:
+        results.append(("pull", False, _redact_token(str(e))))
+        return results
+
+    ok, msg = deploy_app(name)
+    results.append(("deploy", ok, msg))
+    return results
+
+
+def delete_app(name: str) -> tuple[bool, str]:
+    app_dir = _app_dir(name)
+    if app_dir.exists():
+        _compose("down", "--remove-orphans", "-v", cwd=app_dir, timeout=60)
+        shutil.rmtree(app_dir, ignore_errors=True)
+    return True, "Deleted"
+
+
+def get_app_logs(name: str, tail: int = 200) -> str:
+    ps = _compose_ps(_app_dir(name))
+    if not ps:
+        return "No containers found for this app."
+    parts = []
+    for c in ps:
+        log = get_container_logs(c.get("Name", ""), tail=tail)
+        parts.append(f"=== {c.get('Name')} ===\n{log}" if len(ps) > 1 else log)
+    return "\n".join(parts)
+
+
+def clone_app(name: str, repo: str, branch: str = "main") -> tuple[bool, str]:
+    if not re.match(r"^[a-zA-Z0-9_-]+$", name):
+        return False, "Invalid app name — use letters, numbers, - and _ only"
+
+    target = APPS_DIR / name
+    if target.exists():
+        return False, f"Directory already exists: {target}"
+
+    APPS_DIR.mkdir(parents=True, exist_ok=True)
+    repo_url = _inject_github_token(repo)
+    try:
+        r = subprocess.run(
+            ["git", "clone", "-b", branch, repo_url, str(target)],
+            capture_output=True, text=True, timeout=120,
+        )
+        if r.returncode != 0:
+            return False, _redact_token(r.stderr)
+    except subprocess.TimeoutExpired:
+        return False, "Clone timed out"
+    except Exception as e:
+        return False, _redact_token(str(e))
+
+    if _compose_file(target) is None:
+        return False, (
+            f"Cloned to {target}, but no docker-compose.yml was found. "
+            "Add one following docs/adding-an-app.md, then hit Deploy."
+        )
+    return True, f"Cloned to {target}"
+
+
+# ================================================================
+# Raw container actions (core / shared services)
+# ================================================================
 
 def start_container(name: str) -> tuple[bool, str]:
     r = _docker("start", name, timeout=30)
@@ -268,484 +444,17 @@ def restart_container(name: str) -> tuple[bool, str]:
 
 
 # ================================================================
-# Git Operations
-# ================================================================
-
-def clone_app(app: dict) -> tuple[bool, str]:
-    if not app.get("repo"):
-        return False, "No repo URL specified"
-
-    target = get_app_path(app)
-    target.parent.mkdir(parents=True, exist_ok=True)
-    if target.exists():
-        return False, f"Directory already exists: {target}"
-
-    repo_url = _inject_github_token(app["repo"])
-    try:
-        r = subprocess.run(
-            ["git", "clone", "-b", app.get("branch", "main"), repo_url, str(target)],
-            capture_output=True, text=True, timeout=120,
-        )
-        if r.returncode != 0:
-            return False, _redact_token(r.stderr)
-        return True, f"Cloned to {target}"
-    except subprocess.TimeoutExpired:
-        return False, "Clone timed out"
-    except Exception as e:
-        return False, _redact_token(str(e))
-
-
-def pull_app(app: dict) -> tuple[bool, str]:
-    target = get_app_path(app)
-    if not target.exists():
-        return False, "App not cloned yet"
-
-    try:
-        # Temporarily inject token into remote URL for private repos
-        original_url = None
-        token = _get_github_token()
-        if token and app.get("repo") and "github.com" in app["repo"]:
-            get_url = subprocess.run(
-                ["git", "remote", "get-url", "origin"],
-                cwd=str(target), capture_output=True, text=True,
-            )
-            if get_url.returncode == 0:
-                original_url = get_url.stdout.strip()
-                subprocess.run(
-                    ["git", "remote", "set-url", "origin", _inject_github_token(app["repo"])],
-                    cwd=str(target), capture_output=True,
-                )
-
-        r = subprocess.run(
-            ["git", "pull"], cwd=str(target),
-            capture_output=True, text=True, timeout=60,
-        )
-
-        # Restore original URL (strip token)
-        if original_url:
-            subprocess.run(
-                ["git", "remote", "set-url", "origin", original_url],
-                cwd=str(target), capture_output=True,
-            )
-
-        if r.returncode != 0:
-            return False, _redact_token(r.stderr)
-        return True, r.stdout.strip() or "Already up to date"
-    except Exception as e:
-        return False, _redact_token(str(e))
-
-
-def get_git_status(app_name: str) -> dict:
-    app_dir = APPS_DIR / app_name
-    if not app_dir.exists():
-        return {"error": "App folder not found"}
-    if not (app_dir / ".git").exists():
-        return {"error": "Not a git repo"}
-
-    result = {"branch": "", "last_commit": "", "dirty": False, "ahead": 0, "behind": 0}
-
-    try:
-        subprocess.run(["git", "fetch"], cwd=str(app_dir),
-                        capture_output=True, timeout=10)
-    except Exception:
-        pass
-
-    try:
-        r = subprocess.run(["git", "branch", "--show-current"],
-                           cwd=str(app_dir), capture_output=True, text=True, timeout=5)
-        result["branch"] = r.stdout.strip()
-
-        r = subprocess.run(["git", "log", "-1", "--format=%h %s"],
-                           cwd=str(app_dir), capture_output=True, text=True, timeout=5)
-        result["last_commit"] = r.stdout.strip()
-
-        r = subprocess.run(["git", "status", "--porcelain"],
-                           cwd=str(app_dir), capture_output=True, text=True, timeout=5)
-        result["dirty"] = len(r.stdout.strip()) > 0
-
-        r = subprocess.run(["git", "rev-list", "--left-right", "--count", "HEAD...@{u}"],
-                           cwd=str(app_dir), capture_output=True, text=True, timeout=5)
-        if r.returncode == 0 and r.stdout.strip():
-            parts = r.stdout.strip().split()
-            if len(parts) >= 2:
-                result["ahead"] = int(parts[0])
-                result["behind"] = int(parts[1])
-    except Exception as e:
-        result["error"] = str(e)
-
-    return result
-
-
-# ================================================================
-# Build Operations
-# ================================================================
-
-def _generate_compose_override(app: dict) -> Path | None:
-    """Generate a docker-compose override file to inject 3c-network and Traefik labels.
-
-    Returns the path to the override file, or None if no override is needed.
-    """
-    domain = app.get("domain")
-    port = app.get("port", 8000)
-    safe_name = re.sub(r"[^a-z0-9]", "", app["name"])
-
-    # Build labels for Traefik routing
-    labels = {}
-    if domain and app["type"] != "worker":
-        labels = {
-            "traefik.enable": "true",
-            f"traefik.http.routers.{safe_name}.rule": f"Host(`{domain}`)",
-            f"traefik.http.routers.{safe_name}.entrypoints": "web",
-            f"traefik.http.services.{safe_name}.loadbalancer.server.port": str(port),
-        }
-
-    # Read the app's compose file to find service names
-    app_dir = get_app_path(app)
-    compose_file = app_dir / "docker-compose.yml"
-    if not compose_file.exists():
-        return None
-
-    try:
-        # Parse service names from the compose file
-        r = subprocess.run(
-            ["docker", "compose", "config", "--services"],
-            cwd=str(app_dir), capture_output=True, text=True, timeout=10,
-        )
-        services = r.stdout.strip().split("\n") if r.returncode == 0 else []
-    except Exception:
-        services = []
-
-    if not services:
-        return None
-
-    # Build override YAML
-    override = {"services": {}, "networks": {NETWORK: {"external": True}}}
-    for i, svc in enumerate(services):
-        svc_override: dict = {"networks": [NETWORK]}
-        # Apply Traefik labels only to the first service (assumed primary)
-        if i == 0 and labels:
-            svc_override["labels"] = labels
-        override["services"][svc] = svc_override
-
-    GENERATED_DIR.mkdir(parents=True, exist_ok=True)
-    override_path = GENERATED_DIR / f"{app['name']}-override.yml"
-
-    # Write YAML manually (avoid requiring pyyaml)
-    lines = ["services:"]
-    for svc, cfg in override["services"].items():
-        lines.append(f"  {svc}:")
-        lines.append("    networks:")
-        for net in cfg["networks"]:
-            lines.append(f"      - {net}")
-        if "labels" in cfg:
-            lines.append("    labels:")
-            for k, v in cfg["labels"].items():
-                lines.append(f'      - "{k}={v}"')
-    lines.append("networks:")
-    lines.append(f"  {NETWORK}:")
-    lines.append("    external: true")
-    lines.append("")
-
-    override_path.write_text("\n".join(lines))
-    return override_path
-
-
-def generate_dockerfile(app: dict) -> Path:
-    """Generate a Dockerfile for web/worker apps that don't have one."""
-    GENERATED_DIR.mkdir(parents=True, exist_ok=True)
-    dockerfile_path = GENERATED_DIR / f"{app['name']}.Dockerfile"
-
-    app_dir = get_app_path(app)
-    if (app_dir / "main.py").exists():
-        entrypoint = "main:app"
-    elif (app_dir / "app.py").exists():
-        entrypoint = "app:app"
-    elif (app_dir / "src" / "main.py").exists():
-        entrypoint = "src.main:app"
-    else:
-        entrypoint = "main:app"
-
-    port = app.get("port", 8000)
-
-    if app["type"] == "worker":
-        content = """FROM python:3.12-slim
-WORKDIR /app
-COPY requirements.txt* ./
-RUN pip install --no-cache-dir -r requirements.txt 2>/dev/null || true
-COPY . .
-CMD ["python", "main.py"]
-"""
-    else:
-        content = f"""FROM python:3.12-slim
-WORKDIR /app
-COPY requirements.txt* ./
-RUN pip install --no-cache-dir -r requirements.txt 2>/dev/null || true
-COPY . .
-CMD ["uvicorn", "{entrypoint}", "--host", "0.0.0.0", "--port", "{port}"]
-"""
-
-    dockerfile_path.write_text(content)
-    return dockerfile_path
-
-
-def build_app(app: dict) -> tuple[bool, str]:
-    app_dir = get_app_path(app)
-    if not app_dir.exists():
-        return False, "App not cloned yet"
-
-    if app["type"] == "stack":
-        override = _generate_compose_override(app)
-        try:
-            cmd = ["docker", "compose"]
-            if override:
-                cmd += ["-f", "docker-compose.yml", "-f", str(override)]
-            cmd += ["build"]
-            r = subprocess.run(cmd, cwd=str(app_dir),
-                               capture_output=True, text=True, timeout=300)
-            if r.returncode != 0:
-                return False, r.stderr[-500:] if len(r.stderr) > 500 else r.stderr
-            return True, "Built with docker compose"
-        except subprocess.TimeoutExpired:
-            return False, "Build timed out"
-        except Exception as e:
-            return False, str(e)
-
-    # web/worker — single image
-    image_name = f"3c-{app['name']}:latest"
-    if (app_dir / "Dockerfile").exists():
-        dockerfile = str(app_dir / "Dockerfile")
-    else:
-        dockerfile = str(generate_dockerfile(app))
-
-    try:
-        r = _docker("build", "-t", image_name, "-f", dockerfile, str(app_dir), timeout=300)
-        if r.returncode != 0:
-            return False, r.stderr[-500:] if len(r.stderr) > 500 else r.stderr
-        return True, f"Built image: {image_name}"
-    except subprocess.TimeoutExpired:
-        return False, "Build timed out"
-    except Exception as e:
-        return False, str(e)
-
-
-# ================================================================
-# Deploy Operations
-# ================================================================
-
-def _traefik_labels(app: dict) -> list[str]:
-    """Build Traefik label flags for docker run."""
-    domain = app.get("domain")
-    if not domain or app["type"] == "worker":
-        return []
-    safe = re.sub(r"[^a-z0-9]", "", app["name"])
-    port = app.get("port", 8000)
-    return [
-        "--label", "traefik.enable=true",
-        "--label", f"traefik.http.routers.{safe}.rule=Host(`{domain}`)",
-        "--label", f"traefik.http.routers.{safe}.entrypoints=web",
-        "--label", f"traefik.http.services.{safe}.loadbalancer.server.port={port}",
-    ]
-
-
-def deploy_app(app: dict) -> tuple[bool, str]:
-    app_dir = get_app_path(app)
-    if not app_dir.exists():
-        return False, "App not cloned yet"
-
-    if app["type"] == "stack":
-        override = _generate_compose_override(app)
-        try:
-            cmd = ["docker", "compose"]
-            if override:
-                cmd += ["-f", "docker-compose.yml", "-f", str(override)]
-            cmd += ["up", "-d"]
-            r = subprocess.run(cmd, cwd=str(app_dir),
-                               capture_output=True, text=True, timeout=120)
-            if r.returncode != 0:
-                return False, r.stderr[-500:] if len(r.stderr) > 500 else r.stderr
-            return True, "Deployed with docker compose"
-        except Exception as e:
-            return False, str(e)
-
-    # web/worker — single container
-    image_name = f"3c-{app['name']}:latest"
-    container_name = f"3c-{app['name']}"
-
-    # Remove existing container
-    _docker("rm", "-f", container_name, timeout=15)
-
-    cmd = [
-        "docker", "run", "-d",
-        "--name", container_name,
-        "--network", NETWORK,
-        "--restart", "unless-stopped",
-    ]
-
-    # Add Traefik labels
-    cmd.extend(_traefik_labels(app))
-
-    # Add env vars
-    for k, v in app.get("env_vars", {}).items():
-        cmd.extend(["-e", f"{k}={v}"])
-
-    cmd.append(image_name)
-
-    try:
-        r = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
-        if r.returncode != 0:
-            return False, r.stderr
-        return True, f"Deployed container: {container_name}"
-    except Exception as e:
-        return False, str(e)
-
-
-def stop_app(app: dict) -> tuple[bool, str]:
-    app_dir = get_app_path(app)
-
-    if app["type"] == "stack":
-        override = _generate_compose_override(app)
-        try:
-            cmd = ["docker", "compose"]
-            if override:
-                cmd += ["-f", "docker-compose.yml", "-f", str(override)]
-            cmd += ["stop"]
-            r = subprocess.run(cmd, cwd=str(app_dir),
-                               capture_output=True, text=True, timeout=60)
-            if r.returncode != 0:
-                return False, r.stderr
-            return True, "Stopped"
-        except Exception as e:
-            return False, str(e)
-
-    container_name = f"3c-{app['name']}"
-    r = _docker("stop", container_name, timeout=30)
-    if r.returncode != 0:
-        return False, r.stderr or "Container not found"
-    return True, f"Stopped {container_name}"
-
-
-def restart_app(app: dict) -> tuple[bool, str]:
-    """Restart an app's containers without rebuilding."""
-    app_dir = get_app_path(app)
-
-    if app["type"] == "stack":
-        override = _generate_compose_override(app)
-        try:
-            cmd = ["docker", "compose"]
-            if override:
-                cmd += ["-f", "docker-compose.yml", "-f", str(override)]
-            cmd += ["restart"]
-            r = subprocess.run(cmd, cwd=str(app_dir),
-                               capture_output=True, text=True, timeout=60)
-            if r.returncode != 0:
-                return False, r.stderr
-            return True, "Restarted"
-        except Exception as e:
-            return False, str(e)
-
-    container_name = f"3c-{app['name']}"
-    r = _docker("restart", container_name, timeout=30)
-    if r.returncode != 0:
-        return False, r.stderr or "Container not found"
-    return True, f"Restarted {container_name}"
-
-
-def delete_app_containers(app: dict) -> tuple[bool, str]:
-    """Stop and remove containers, then delete app files."""
-    app_dir = get_app_path(app)
-
-    if app["type"] == "stack" and app_dir.exists():
-        override = _generate_compose_override(app)
-        cmd = ["docker", "compose"]
-        if override:
-            cmd += ["-f", "docker-compose.yml", "-f", str(override)]
-        cmd += ["down", "--remove-orphans"]
-        subprocess.run(cmd, cwd=str(app_dir),
-                       capture_output=True, text=True, timeout=60)
-    else:
-        _docker("rm", "-f", f"3c-{app['name']}", timeout=15)
-
-    # Delete app directory
-    if app_dir.exists():
-        shutil.rmtree(app_dir, ignore_errors=True)
-
-    return True, "Deleted"
-
-
-# ================================================================
-# Combined Operations
-# ================================================================
-
-def full_deploy(app: dict) -> list[tuple[str, bool, str]]:
-    """Clone (if needed) → build → deploy."""
-    results = []
-
-    app_dir = get_app_path(app)
-    if not app_dir.exists():
-        if app.get("repo"):
-            ok, msg = clone_app(app)
-            results.append(("clone", ok, msg))
-            if not ok:
-                return results
-        else:
-            results.append(("clone", False, "No repo and app folder doesn't exist"))
-            return results
-    else:
-        results.append(("clone", True, "Already exists"))
-
-    ok, msg = build_app(app)
-    results.append(("build", ok, msg))
-    if not ok:
-        return results
-
-    ok, msg = deploy_app(app)
-    results.append(("deploy", ok, msg))
-    return results
-
-
-def pull_and_restart(app: dict) -> list[tuple[str, bool, str]]:
-    """Pull → rebuild → redeploy."""
-    results = []
-
-    ok, msg = pull_app(app)
-    results.append(("pull", ok, msg))
-    if not ok:
-        return results
-
-    ok, msg = build_app(app)
-    results.append(("build", ok, msg))
-    if not ok:
-        return results
-
-    ok, msg = deploy_app(app)
-    results.append(("deploy", ok, msg))
-    return results
-
-
-# ================================================================
 # 3C Self-Update
 # ================================================================
 
 def pull_3c() -> dict:
-    """Pull 3C's own repo and detect what changed."""
-    result = {
-        "success": False,
-        "message": "",
-        "changed_files": [],
-        "restart_required": False,
-    }
+    result = {"success": False, "message": "", "changed_files": [], "restart_required": False}
 
     try:
-        head_before = subprocess.run(
-            ["git", "rev-parse", "HEAD"], cwd=str(BASE_DIR),
-            capture_output=True, text=True, timeout=5,
-        )
+        head_before = subprocess.run(["git", "rev-parse", "HEAD"], cwd=str(BASE_DIR), capture_output=True, text=True, timeout=5)
         old_head = head_before.stdout.strip() if head_before.returncode == 0 else None
 
-        pull = subprocess.run(
-            ["git", "pull"], cwd=str(BASE_DIR),
-            capture_output=True, text=True, timeout=60,
-        )
+        pull = subprocess.run(["git", "pull"], cwd=str(BASE_DIR), capture_output=True, text=True, timeout=60)
         if pull.returncode != 0:
             result["message"] = pull.stderr.strip() or "Pull failed"
             return result
@@ -755,17 +464,11 @@ def pull_3c() -> dict:
             result["message"] = "Already up to date"
             return result
 
-        head_after = subprocess.run(
-            ["git", "rev-parse", "HEAD"], cwd=str(BASE_DIR),
-            capture_output=True, text=True, timeout=5,
-        )
+        head_after = subprocess.run(["git", "rev-parse", "HEAD"], cwd=str(BASE_DIR), capture_output=True, text=True, timeout=5)
         new_head = head_after.stdout.strip() if head_after.returncode == 0 else None
 
         if old_head and new_head and old_head != new_head:
-            diff = subprocess.run(
-                ["git", "diff", "--name-only", old_head, new_head], cwd=str(BASE_DIR),
-                capture_output=True, text=True, timeout=10,
-            )
+            diff = subprocess.run(["git", "diff", "--name-only", old_head, new_head], cwd=str(BASE_DIR), capture_output=True, text=True, timeout=10)
             if diff.returncode == 0:
                 result["changed_files"] = [f for f in diff.stdout.strip().split("\n") if f]
 
@@ -790,7 +493,7 @@ def restart_3c() -> tuple[bool, str]:
     """Rebuild and restart the 3C panel via docker compose."""
     try:
         r = subprocess.run(
-            ["docker", "compose", "up", "--build", "-d", "panel"],
+            ["docker", "compose", "-p", ROOT_PROJECT, "up", "--build", "-d", "panel"],
             cwd=str(BASE_DIR),
             capture_output=True, text=True, timeout=300,
         )
@@ -799,39 +502,3 @@ def restart_3c() -> tuple[bool, str]:
         return True, "Restarting..."
     except Exception as e:
         return False, str(e)
-
-
-def get_3c_git_status() -> dict:
-    """Get git status for 3C itself."""
-    result = {"branch": "", "last_commit": "", "dirty": False, "ahead": 0, "behind": 0}
-
-    try:
-        subprocess.run(["git", "fetch"], cwd=str(BASE_DIR),
-                        capture_output=True, timeout=10)
-    except Exception:
-        pass
-
-    try:
-        r = subprocess.run(["git", "branch", "--show-current"],
-                           cwd=str(BASE_DIR), capture_output=True, text=True, timeout=5)
-        result["branch"] = r.stdout.strip()
-
-        r = subprocess.run(["git", "log", "-1", "--format=%h %s"],
-                           cwd=str(BASE_DIR), capture_output=True, text=True, timeout=5)
-        result["last_commit"] = r.stdout.strip()
-
-        r = subprocess.run(["git", "status", "--porcelain"],
-                           cwd=str(BASE_DIR), capture_output=True, text=True, timeout=5)
-        result["dirty"] = len(r.stdout.strip()) > 0
-
-        r = subprocess.run(["git", "rev-list", "--left-right", "--count", "HEAD...@{u}"],
-                           cwd=str(BASE_DIR), capture_output=True, text=True, timeout=5)
-        if r.returncode == 0 and r.stdout.strip():
-            parts = r.stdout.strip().split()
-            if len(parts) >= 2:
-                result["ahead"] = int(parts[0])
-                result["behind"] = int(parts[1])
-    except Exception as e:
-        result["error"] = str(e)
-
-    return result

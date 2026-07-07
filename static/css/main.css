@@ -667,6 +667,7 @@ a:hover { text-decoration: underline; }
 .text-accent { color: var(--accent); }
 .text-success { color: var(--success); }
 .text-danger { color: var(--danger); }
+.mt-8 { margin-top: 8px; }
 .mt-12 { margin-top: 12px; }
 .mt-16 { margin-top: 16px; }
 .mb-12 { margin-bottom: 12px; }
@@ -753,37 +754,99 @@ a:hover { text-decoration: underline; }
     white-space: nowrap;
 }
 
-/* Legacy grid (kept for reference, unused) */
-.project-cards {
-    display: grid;
-    grid-template-columns: repeat(auto-fill, minmax(340px, 1fr));
-    gap: 16px;
+/* ================================================================
+   Apps dashboard — section headers + rich app list
+   ================================================================ */
+.section-title {
+    font-size: 12px;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color: var(--text-secondary);
+    margin: 24px 0 10px;
 }
 
-.project-card {
-    background: var(--bg-secondary);
+.section-title:first-child { margin-top: 0; }
+
+.app-list {
     border: 1px solid var(--border);
-    padding: 20px;
+    background: var(--bg-secondary);
+    margin-bottom: 8px;
 }
 
-.project-card h3 {
+.app-row {
+    padding: 16px 20px;
+    border-bottom: 1px solid var(--border);
+}
+
+.app-row:last-child { border-bottom: none; }
+.app-row:hover { background: var(--bg-hover); }
+
+.app-row-top {
+    display: flex;
+    align-items: center;
+    gap: 18px;
+    flex-wrap: wrap;
+}
+
+.app-row-title {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex: 0 0 auto;
+}
+
+.app-row-title h3 {
     font-size: 15px;
     font-weight: 600;
-    margin-bottom: 10px;
+    white-space: nowrap;
 }
 
-.project-card .meta {
+.app-row-domain {
     font-size: 12px;
     color: var(--text-secondary);
-    margin-bottom: 4px;
+    flex: 1 1 200px;
+    min-width: 0;
 }
 
-.project-card .meta a { font-size: 12px; }
+.app-row-domain a { font-size: 12px; }
 
-.project-card .card-actions {
-    margin-top: 14px;
+.app-row-actions {
     display: flex;
-    gap: 8px;
+    gap: 6px;
+    flex-wrap: wrap;
+    flex: 0 0 auto;
+    margin-left: auto;
+}
+
+.app-row-git {
+    font-size: 11px;
+    color: var(--text-secondary);
+    margin-top: 8px;
+}
+
+.app-row-containers {
+    margin-top: 10px;
+    border-top: 1px solid var(--border);
+    padding-top: 6px;
+}
+
+.app-row-container {
+    display: grid;
+    grid-template-columns: minmax(100px, 1fr) minmax(120px, 1.4fr) 64px minmax(140px, auto);
+    align-items: center;
+    gap: 14px;
+    padding: 5px 0;
+    font-size: 11px;
+}
+
+.app-row-container + .app-row-container {
+    border-top: 1px dashed var(--border);
+}
+
+.app-row-container .mono {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
 }
 
 /* Deploy status indicator */

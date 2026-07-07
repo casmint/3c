@@ -3,6 +3,7 @@ services:
     image: cloudflare/cloudflared:latest
     container_name: 3c-tunnel
     restart: unless-stopped
+    mem_limit: 256m
     command: tunnel run
     environment:
       - TUNNEL_TOKEN=${CLOUDFLARE_TUNNEL_TOKEN}
@@ -13,6 +14,7 @@ services:
     image: traefik:v2.11
     container_name: traefik
     restart: unless-stopped
+    mem_limit: 256m
     command:
       - "--providers.docker=true"
       - "--providers.docker.exposedbydefault=false"
@@ -22,16 +24,28 @@ services:
     networks:
       - 3c-network
 
+  ollama:
+    image: ollama/ollama:latest
+    container_name: ollama
+    restart: unless-stopped
+    mem_limit: 4g
+    environment:
+      - OLLAMA_NUM_PARALLEL=4
+    volumes:
+      - ollama_data:/root/.ollama
+    networks:
+      - 3c-network
+
   panel:
     build: .
     container_name: 3c-panel
     restart: unless-stopped
+    mem_limit: 512m
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
       - /usr/bin/docker:/usr/bin/docker:ro
       - /usr/libexec/docker/cli-plugins:/usr/libexec/docker/cli-plugins:ro
       - ~/.config/3c/config.toml:/root/.config/3c/config.toml:ro
-      - ./apps.json:/app/apps.json
       - ./notes.json:/app/notes.json
       - ./apps:/app/apps
       - ./.env:/app/.env:ro
@@ -44,6 +58,9 @@ services:
       - "traefik.http.services.3c.loadbalancer.server.port=8000"
     networks:
       - 3c-network
+
+volumes:
+  ollama_data:
 
 networks:
   3c-network:
