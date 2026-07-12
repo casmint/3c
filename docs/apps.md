@@ -1,82 +1,114 @@
-# 3c Apps
+# Apps
 
-## Currently Running Apps
+Apps live under:
 
-| App | Domain | Container | Stack | Notes |
-|-----|--------|-----------|-------|-------|
-| 3c Panel | 3c.lol | `3c-panel` | FastAPI + vanilla JS SPA | Control panel, protected by Cloudflare Access |
-| vibeslopwiki | vibeslop.wiki | `vibeslop-app` | FastAPI + SQLite + Ollama | Hallucinatory encyclopedia |
-| woketown | woke.town | `woketown` | FastAPI + SQLAlchemy + SQLite | Social network |
-| skitter-server | server.skitter.lol | `skitter-server` | Godot 4 binary | Multiplayer game server (WebSocket, port 4567) |
-| chatrequest | chatre.quest | `chatrequest` | FastAPI + SQLite + Ollama | Embeddable AI chatbot |
+```text
+/home/ubuntu/3c/apps/
+```
 
-## Core Infrastructure
+The panel discovers apps automatically. There is no `apps.json`.
 
-The panel classifies these as "core" (the platform itself) rather than apps or shared services — see [panel.md](panel.md).
+## Current app inventory
 
-| Service | Container | Access | Notes |
-|---------|-----------|--------|-------|
-| 3c Panel | `3c-panel` | `https://3c.lol` | Control panel |
-| Traefik | `traefik` | `http://traefik:80` (internal) | Routes by Host header |
-| Cloudflare Tunnel | `3c-tunnel` | — | Sole internet entry point |
+| App directory | Domain | Container | Networks | Backend / purpose |
+|---|---|---|---|---|
+| `vibeslopwiki` | `vibeslop.wiki` | `vibeslop-app` | `3c-network` | Hallucinatory wiki, Oracle Ollama CPU |
+| `chatrequest` | `chatre.quest` | `chatrequest` | `3c-network` | Embeddable chatbot, Oracle Ollama CPU |
+| `genquest` | `eld.quest` | `genquest` | `3c-network`, `gpu-network` | EldQuest, CompGate/home GPU |
+| `cchannel` | `cchannel.org` | `cchannel` | `3c-network`, `gpu-network` | AI radio, CompGate/home GPU + TTS |
+| `woketown` | `woke.town` | `woketown` | `3c-network` | Social network |
+| `skitter-server` | `server.skitter.lol` | `skitter-server` | `3c-network` | Godot multiplayer server, WebSocket port 4567 |
+| `klipke` | `klipke.com` | `klipke` | `3c-network` | Web app / game server |
 
-## Shared Services
+## AI-backed apps
 
-Services defined in the root `docker-compose.yml` that apps consume but that aren't the platform itself.
+### vibeslopwiki
 
-| Service | Container | Access | Notes |
-|---------|-----------|--------|-------|
-| Ollama | `ollama` | `http://ollama:11434` | qwen2.5:1.5b, 4GB limit, 4 parallel slots |
+| Item | Value |
+|---|---|
+| Domain | `vibeslop.wiki` |
+| Backend | Oracle-local Ollama |
+| Endpoint | `http://oracle-ollama:11434/api/generate` |
+| Model | `qwen2.5:1.5b` |
+| Network | `3c-network` only |
+| Database | SQLite volume |
 
-## 3c Panel (`/home/ubuntu/3c/`)
+Purpose: generate plausible-sounding fake encyclopedia articles and related stubs.
 
-The hub control panel for the entire server. See [panel.md](panel.md) for full API and structure documentation.
+### chatrequest
 
-- **Stack**: FastAPI + vanilla JS SPA (no build step), static files served from `/home/ubuntu/3c/static/`
-- **Source**: `/home/ubuntu/3c/panel/` (Python package)
-- **Docker**: defined in root `/home/ubuntu/3c/docker-compose.yml` alongside core services
-- **Config**: `~/.config/3c/config.toml` (Cloudflare + Porkbun + Migadu credentials), mounted read-only
-- **Docker socket**: mounted so the panel can manage other containers
-- **Integrations**: Cloudflare (zones, DNS, Pages, analytics, redirects), Porkbun (domain management, nameservers), Migadu (email hosting)
-- **App registry**: none — every subdirectory of `apps/` with its own `docker-compose.yml` is discovered live as an app (see [panel.md](panel.md))
-- **Notes**: `notes.json` — user annotation key-value store (namespaced)
-- **Self-update**: `POST /api/3c/pull-restart` — git pull + container restart
+| Item | Value |
+|---|---|
+| Domain | `chatre.quest` |
+| Backend | Oracle-local Ollama |
+| Endpoint | `http://oracle-ollama:11434/api/chat` |
+| Model | `qwen2.5:1.5b` |
+| Network | `3c-network` only |
+| Database | SQLite volume |
 
-## vibeslopwiki (`/home/ubuntu/3c/apps/vibeslopwiki/`)
+Purpose: embeddable chatbot for static sites. Uses token/domain validation and rate limiting.
 
-Hallucinatory Wikipedia — generates plausible-sounding but completely fabricated encyclopedia articles on demand.
+### genquest / EldQuest
 
-- **Model**: `qwen2.5:1.5b` via Ollama `/api/generate`
-- **DB**: SQLite (`articles`, `stubs`, `banned` tables)
-- **Port**: 8000
-- **Admin token**: `<redacted — see vibeslopwiki's .env>` (via `?token=` param at `/admin`)
-- **Key features**: SSE streaming generation, wiki link extraction, SVG diagram generation (50% of articles), 4 parallel generations
-- **SVG diagrams**: LLM-generated, fire in parallel with article text
+| Item | Value |
+|---|---|
+| Domain | `eld.quest` |
+| Backend | CompGate through Tailscale |
+| Gateway | `http://tailscale:9090` |
+| Model(s) | `MODEL_PROSE=gpt-oss:20b`, `MODEL_LOGIC=gpt-oss:20b` |
+| Networks | `3c-network`, `gpu-network` |
+| Database | SQLite volume |
 
-## woketown (`/home/ubuntu/3c/apps/woketown/`)
+Purpose: generated exploration/RPG world. Uses a thin `backend/compgate.py` client.
 
-Social network with posts, likes, follows, and replies.
+### CChannel
 
-- **DB**: SQLite via SQLAlchemy async (`aiosqlite`)
-- **Auth**: JWT tokens
-- **Port**: 8000
+| Item | Value |
+|---|---|
+| Domain | `cchannel.org` |
+| Backend | CompGate through Tailscale |
+| Gateway | `http://tailscale:9090` |
+| Model | `gpt-oss:20b` |
+| TTS | Kokoro and Bark through CompGate |
+| Networks | `3c-network`, `gpu-network` |
+| Database/audio | SQLite + audio/music volumes |
 
-## skitter-server (`/home/ubuntu/3c/apps/skitter-server/`)
+Purpose: AI-generated radio station. Uses home GPU for script generation and home TTS for speech/audio.
 
-Godot 4 multiplayer server for the game Skitter.
+## Non-AI / support apps
 
-- **Image**: Ubuntu 22.04 + ARM64 binary
-- **Port**: 4567 (WebSocket)
-- **Deploy**: Pulls binary from GitHub releases
+### woketown
 
-## chatrequest (`/home/ubuntu/3c/apps/chatrequest/`)
+Social network with posts, replies, follows, likes, and JWT auth.
 
-Embeddable AI chatbot system for static websites.
+Current note: architecture differs from the standard app template because it builds from a backend subdirectory and bind-mounts `data/` and `frontend/`. It works, but it is less consistent than the standard FastAPI app pattern.
 
-- **Model**: `qwen2.5:1.5b` via Ollama `/api/chat` (multi-turn)
-- **DB**: SQLite (`sites`, `conversations`, `messages` tables)
-- **Port**: 8000
-- **Admin**: chatre.quest (Cloudflare Access protected)
-- **Embed**: `<script src="https://chatre.quest/embed.js" data-token="TOKEN">`
-- **Security**: token + Origin/Referer domain validation + per-IP rate limiting (1/5s, 30/hr)
-- **Rate limit**: uses `CF-Connecting-IP` header (Cloudflare sets this), falls back to `X-Forwarded-For`
+### skitter-server
+
+Godot 4 multiplayer server. Routes WebSocket traffic on internal port `4567` through Traefik.
+
+### klipke
+
+App at `klipke.com`, routed through Traefik on port `8000`.
+
+## Panel classification
+
+The panel groups Docker things into:
+
+- **Core**: root services that are the platform itself: `panel`, `traefik`, `cloudflared`.
+- **Shared**: root services that apps consume, such as Oracle Ollama and Tailscale/CompGate bridge helpers.
+- **Apps**: discovered app directories under `apps/` with their own Compose files.
+- **Other**: containers on the host not accounted for by the above.
+
+## App metadata source of truth
+
+App metadata belongs in the app repo, mostly in `docker-compose.yml`:
+
+- domain: Traefik `Host()` label;
+- port: Traefik load balancer label;
+- networks: Compose `networks`;
+- AI backend: environment variables and network membership;
+- lifecycle: Docker Compose status;
+- source state: Git status in app directory.
+
+Do not create or update an `apps.json` file. It is obsolete.

@@ -1,0 +1,8 @@
+# The panel image only needs its Python package, static SPA assets, and build metadata.
+# Apps are mounted at runtime; never send app data, secrets, or repository history.
+**
+!panel/
+!panel/**
+!static/
+!static/**
+!pyproject.toml

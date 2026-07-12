@@ -88,29 +88,34 @@ Open `http://localhost:8000`. Note: apps module requires Docker.
 
 ## Apps
 
-Apps are managed via `apps.json` at the repo root. Each app entry:
+`apps.json` is obsolete and must not be reintroduced. The filesystem is the
+app registry: every direct child of `apps/` with its own Compose file is
+auto-detected by the panel.
 
-```json
-{
-  "name": "myapp",
-  "type": "stack",
-  "repo": "https://github.com/user/myapp",
-  "branch": "main",
-  "domain": "myapp.com",
-  "port": 8000,
-  "enabled": true
-}
+```text
+apps/{appname}/docker-compose.yml
 ```
 
-**App types:**
-- `stack` — has its own `docker-compose.yml`, deployed via `docker compose up -d`
-- `web` — single container with Traefik routing, auto-generates Dockerfile if missing
-- `worker` — background container, no HTTP routing
+Each app owns its Docker Compose configuration, including its networks,
+Traefik labels, environment, and volumes. The panel can clone a repository
+into `apps/{name}/`, but it does not generate Dockerfiles, inject networks,
+or add routing labels.
 
-Apps are cloned to `apps/{name}/` (gitignored). Deploy flow: clone → build → run.
+Public apps must join `3c-network` and declare their Traefik routing labels.
+For a new public hostname, also add a Cloudflare Tunnel public-hostname rule
+that forwards the domain to `http://traefik:80`.
 
-When deploying, 3C auto-injects `3c-network` and Traefik labels so apps
-are routed correctly through the tunnel.
+### AI backend choice is app-specific
+
+3C deliberately has two AI paths:
+
+- **Oracle-local Ollama** stays on the Oracle server and serves lightweight,
+  always-on workloads. `vibeslopwiki` (VSW) and `chatrequest` (ChatReQuest)
+  use `http://oracle-ollama:11434` with `qwen2.5:1.5b` on `3c-network`.
+- **Home CompGate over Tailscale** serves heavier generation and TTS from the
+  home PC. `cchannel` (CChannel.org) and `genquest` (Eld.Quest) use
+  `http://tailscale:9090` and must join both `3c-network` and `gpu-network`.
+  CompGate may return 503 while the home GPU is busy or paused for gaming.
 
 ## .env
 
@@ -166,10 +171,9 @@ If migrating from the previous C3 panel:
 ## Architecture
 
 ```
-docker-compose.yml    cloudflared + traefik + panel
-apps.json             App registry
-apps/                 Cloned app repos (gitignored)
-.env                  Tunnel token, GitHub token
+docker-compose.yml    cloudflared + traefik + panel + AI bridge services
+apps/                 Filesystem app registry; each app owns its Compose file
+.env                  Sensitive root Compose configuration
 
 static/               Vanilla HTML + CSS + JS (no build step)
   index.html          Single HTML shell

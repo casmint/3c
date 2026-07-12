@@ -1,39 +1,124 @@
-# 3c TODO
+# TODO
 
-Working list of known gaps, prioritized loosely by impact. Not all of these have an agreed approach yet — see "Open architecture question" at the bottom before making further changes to how apps and 3rd-party integrations are organized in the panel.
+## Highest-value next work
 
-## Done
-- [x] Resource limits (`mem_limit`) added to every service, root compose + all 4 app composes. Ollama already had one (4g); added cloudflared 256m, traefik 256m, panel 512m, chatrequest 512m, vibeslopwiki 512m, woketown 512m, skitter-server 1g. Total worst case ~7.7GB of 23GB host RAM — plenty of headroom. Revisit under real load (add `cpus` limits too if something misbehaves).
-- [x] Real-time app control panel. Removed `apps.json` entirely — `apps/` is now the registry (every subdirectory with its own `docker-compose.yml` is discovered live via `docker compose ps`/`config`). Apps and Containers are unified into one `/apps` page: Core Infrastructure / Shared Services / Apps (rich per-app rows: domain, git status, per-container live mem/cpu, start/stop/restart/deploy/pull-rebuild/logs/delete) / Other. Fixed two real bugs found during rollout: (1) root-project `docker compose` calls need `-p 3c` pinned explicitly since the panel container's cwd doesn't match the host directory name; (2) git commands needed `safe.directory '*'` in the Dockerfile since bind-mounted repos are owned by the host UID. See [panel.md](panel.md) for the current API shape.
+### 1. Add an AI Backends page
 
-## Open
+3C should show both AI tiers clearly:
 
-### 1. Container health + request visibility on the dashboard
-Right now nothing verifies a container is actually healthy — Traefik and `docker ps` only know the process is running, not that it's responding. Want the dashboard to show real health (and ideally basic request stats) per app, not just "Up 7 weeks". Needs: Docker `HEALTHCHECK` (or Traefik health check) per service, plus a panel UI surface for it. Bigger version: lightweight request/latency counters per app, exposed to the panel.
+```text
+Oracle Ollama
+- reachable?
+- models available?
+- qwen2.5:1.5b present?
+- apps using it: vibeslopwiki, chatrequest
 
-### 2. Secrets handling is inconsistent across apps — fix later
-Three different patterns in use right now:
-- chatrequest: `env_file: .env` (correct)
-- vibeslopwiki: `ADMIN_TOKEN=${ADMIN_TOKEN}` inlined from shell/compose env
-- woketown: `SECRET_KEY=${SECRET_KEY:-change_me_in_production_please}` — insecure literal default, silently active if `.env` isn't loaded
+CompGate
+- reachable from Oracle host?
+- reachable from gpu-network?
+- home Ollama reachable?
+- Kokoro reachable?
+- Bark reachable?
+- GPU paused / available?
+- apps using it: genquest, cchannel
+```
 
-Standardize everything on `env_file: .env` and remove the woketown fallback default.
+Suggested backend endpoint:
 
-### 3. Redesign woketown architecture
-woketown diverges from the standard app template in `adding-an-app.md`: builds from `./backend` subdir instead of a root Dockerfile, bind-mounts `./data` and `./frontend` instead of a named volume + baked-in static files. Not broken, just inconsistent with chatrequest/vibeslopwiki and harder to reason about. Worth bringing in line with the standard pattern (or deciding the standard pattern should flex for apps like this).
+```text
+GET /api/ai/status
+```
 
-### 4. Migrate recoverable apps from `~/c3-old`
-See [legacy-c3-audit.md](legacy-c3-audit.md) for the full inventory. `~/c3-old` is the predecessor project (then called "C3") and still has 7 apps, several with cached images and intact data volumes on this same host — recovery cost is low, no rebuild-from-scratch needed. Candidates mentioned so far: 76e-radio, cxtwitter. Needs a per-app decision on which are still wanted before migrating.
+Suggested frontend route:
 
-## Open architecture question
+```text
+/ai
+```
 
-Current 3c panel bundles two fairly different concerns:
-- **1st-party app management** (local Docker apps: deploy, start/stop/restart, logs) — this was the *entire* focus of the old C3 panel.
-- **3rd-party service integrations** (Cloudflare zones/DNS/Pages/analytics, Porkbun domains, Migadu email) — new in 3c, not present in old C3 at all.
+### 2. Add real health checks
 
-Both are "things running on/for this server," but one is container orchestration and the other is API wrappers around external services. Not yet decided whether they should:
-- stay unified in one panel (current state), or
-- split into two UIs/backends that share auth/network but are otherwise independent, or
-- stay one backend/panel but split the *frontend* into clearly separated sections (already partially true — `static/js/` has `apps.js` vs `dns.js`/`domains.js`/`email.js`/`zones.js`/`redirects.js`/`pages.js` as distinct files).
+Current status mostly means "container process exists." Add health/readiness checks for:
 
-No action until this is decided — it affects how any further app-management or integration work above gets organized.
+- panel;
+- each app HTTP root or `/health` endpoint;
+- Oracle Ollama `/api/tags`;
+- CompGate `/health`;
+- Kokoro and Bark through CompGate.
+
+### 3. Standardize secrets
+
+Move all apps toward:
+
+```yaml
+env_file: .env
+```
+
+Avoid inline secrets and insecure fallback defaults.
+
+Known inconsistent cases:
+
+- `vibeslopwiki` inlines `ADMIN_TOKEN=${ADMIN_TOKEN}`;
+- `woketown` has a fallback `SECRET_KEY` default that should not be active in production.
+
+### 4. Update old direct-GPU assumptions
+
+Some code/comments/docs may still imply apps should call home Ollama/Kokoro/Bark directly at `tailscale:11434`, `tailscale:8880`, or `tailscale:8881`.
+
+Current desired direction:
+
+```text
+EldQuest and CChannel → http://tailscale:9090 → CompGate
+```
+
+Direct forwards can remain for legacy/debug, but new app code should use CompGate.
+
+### 5. Redesign Woketown architecture
+
+`woketown` diverges from the standard app template:
+
+- builds from `./backend` instead of root Dockerfile;
+- bind-mounts `./data` and `./frontend`;
+- uses a different persistence pattern.
+
+Not urgent, but it should either be standardized or documented as intentionally different.
+
+### 6. Migrate selected old C3 apps
+
+See [`legacy-c3-audit.md`](legacy-c3-audit.md).
+
+Candidates mentioned as worth considering:
+
+- `76e-radio`;
+- `cxtwitter`;
+- static sites.
+
+Migrate one simple app first to validate the process.
+
+## Architecture questions
+
+### Should app management and third-party integrations remain one panel?
+
+The panel currently contains two categories:
+
+1. local app/container orchestration;
+2. external API integrations: Cloudflare, Porkbun, Migadu.
+
+They can remain unified if the UI clearly separates sections. Avoid mixing app actions with external domain/email actions in one muddled screen.
+
+### Should direct GPU forwards stay?
+
+Root Compose currently forwards home Ollama/Kokoro/Bark directly in addition to CompGate.
+
+Reasons to keep them:
+
+- debugging;
+- emergency bypass;
+- host-level experiments.
+
+Reasons to remove eventually:
+
+- one gateway is easier to secure and reason about;
+- apps should not care where home AI services live;
+- direct service URLs create configuration drift.
+
+Current compromise: keep direct forwards, but document CompGate as the app integration path.

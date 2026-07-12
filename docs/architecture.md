@@ -1,51 +1,62 @@
-# 3c Infrastructure Architecture
+# 3C Infrastructure Architecture
 
 ## Overview
 
-3c is a self-hosted app platform on an Oracle ARM64 cloud instance. All public traffic routes through a Cloudflare Tunnel, through Traefik as a reverse proxy, to app containers — no public ports are exposed on the host.
+3C runs on an Oracle PAYG ARM64 server. Public traffic enters only through Cloudflare Tunnel, then reaches Traefik, then the appropriate app container.
 
-```
+```text
 Internet
-   │
-   ▼
-Cloudflare (TLS termination, DDoS protection, Access auth)
-   │
-   ▼ (Cloudflare Tunnel)
-3c-tunnel container (cloudflare/cloudflared)
-   │
-   ▼ http://traefik:80
-Traefik v2.11 container (reverse proxy, auto-discovery via Docker labels)
-   │
-   ├──▶ 3c-panel (3c.lol)         port 8000
-   ├──▶ vibeslopwiki (vibeslop.wiki) port 8000
-   ├──▶ woketown (woke.town)       port 8000
-   ├──▶ chatrequest (chatre.quest) port 8000
-   └──▶ skitter-server (server.skitter.lol) port 4567
+   ↓
+Cloudflare
+   - TLS termination
+   - DDoS protection
+   - Cloudflare Access for admin surfaces
+   ↓ Cloudflare Tunnel
+3c-tunnel container
+   ↓ http://traefik:80
+Traefik v2.11
+   ↓ Host() routing from Docker labels
+App containers on 3c-network
 ```
+
+No public host ports are required for app traffic. Cloudflare Tunnel is the public ingress path.
 
 ## Server
 
-- **Provider**: Oracle Cloud Infrastructure (ARM)
-- **Architecture**: ARM64 (aarch64)
-- **RAM**: 23 GB
-- **OS**: Oracle Linux, kernel 6.17
-- **Shell user**: ubuntu
-- **Project root**: `/home/ubuntu/3c/`
+| Item | Value |
+|---|---|
+| Provider | Oracle Cloud Infrastructure PAYG |
+| Architecture | ARM64 / aarch64 |
+| RAM | about 23 GB |
+| Shell user | `ubuntu` |
+| Project root | `/home/ubuntu/3c` |
+| Panel URL | `https://3c.lol` |
 
-## Core Services (`/home/ubuntu/3c/docker-compose.yml`)
+## Root Compose services
 
-| Container | Image | Purpose |
-|-----------|-------|---------|
-| `3c-tunnel` | cloudflare/cloudflared | Cloudflare Tunnel client — sole internet ingress |
-| `traefik` | traefik:v2.11 | Reverse proxy, routes by Host header via Docker labels |
-| `3c-panel` | custom (python:3.11-slim) | Control panel UI at 3c.lol |
-| `ollama` | ollama/ollama | Shared LLM server, 4GB memory limit, `OLLAMA_NUM_PARALLEL=4` |
+Root services live in `/home/ubuntu/3c/docker-compose.yml`.
 
-All containers share the `3c-network` Docker bridge network (`172.18.0.0/16`). Apps discover each other by container name (e.g. `http://ollama:11434`).
+| Service | Container | Network(s) | Purpose |
+|---|---|---|---|
+| `cloudflared` | `3c-tunnel` | `3c-network` | Cloudflare Tunnel client |
+| `traefik` | `traefik` | `3c-network` | Internal reverse proxy |
+| `panel` | `3c-panel` | `3c-network` | 3C control panel |
+| `oracle-ollama` | `oracle-ollama` | `3c-network` | Oracle-local CPU-only Ollama |
+| `tailscale` | `tailscale` | `gpu-network` | Tailscale namespace used by GPU bridge containers |
+| `gpu-proxy` | `gpu-proxy` | `network_mode: service:tailscale` | Legacy/debug forward to home Ollama `:11434` |
+| `gpu-proxy-kokoro` | `gpu-proxy-kokoro` | `network_mode: service:tailscale` | Legacy/debug forward to home Kokoro `:8880` |
+| `gpu-proxy-bark` | `gpu-proxy-bark` | `network_mode: service:tailscale` | Legacy/debug forward to home Bark `:8881` |
+| `gpu-proxy-compgate` | `gpu-proxy-compgate` | `network_mode: service:tailscale` | Forward to home CompGate `:9090` |
 
-## Network: `3c-network`
+The direct `gpu-proxy`, `gpu-proxy-kokoro`, and `gpu-proxy-bark` forwards may still exist for legacy/debug access. New app integrations should prefer CompGate at `http://tailscale:9090` so each app talks to one gateway instead of directly coupling itself to home Ollama/Kokoro/Bark.
 
-Defined in the root `docker-compose.yml` as `name: 3c-network`. Apps reference it as:
+## Docker networks
+
+### `3c-network`
+
+Main application network. Traefik, the panel, Oracle Ollama, and public app containers join this network.
+
+Apps must join this network to be reachable by Traefik.
 
 ```yaml
 networks:
@@ -53,67 +64,108 @@ networks:
     external: true
 ```
 
-The root compose creates the network; all apps just join it.
+### `gpu-network`
 
-## Cloudflare Tunnel
+Private network for app containers that need home GPU services through the Tailscale bridge.
 
-- **Tunnel ID**: `2d44e991-6a1b-4bc0-af13-a05498efa10d`
-- **Account ID**: `3c63a1a60cbc824d9e464fcf2484ff97`
-- **Token**: stored in `/home/ubuntu/3c/.env` as `CLOUDFLARE_TUNNEL_TOKEN`
-- **Config**: managed via Cloudflare Zero Trust dashboard (not a config file)
-- **All hostnames** route to `http://traefik:80` — Traefik handles the final routing by Host header
-- **API token** in `~/.config/3c/config.toml` has Zone/DNS/Pages permissions but NOT tunnel management — use the Zero Trust dashboard to add new hostnames
-- **TLS**: terminated at Cloudflare. Traefik only sees plain HTTP on port 80.
-- **Auth**: Cloudflare Access protects admin interfaces (3c.lol, chatre.quest) via Google OAuth — no auth code needed in app backends
+Apps using CompGate must join both networks:
 
-## Traefik
+```yaml
+networks:
+  - 3c-network
+  - gpu-network
+```
 
-Entry point: `web` on port 80 (HTTP only — no TLS, that's Cloudflare's job).
+Traefik should still be told to route over `3c-network`:
 
-Apps declare themselves via Docker labels:
+```yaml
+labels:
+  - "traefik.docker.network=3c-network"
+```
+
+## Ingress and routing
+
+Cloudflare Tunnel public hostnames should point to:
+
+```text
+http://traefik:80
+```
+
+Traefik performs final routing using app labels:
+
 ```yaml
 labels:
   - "traefik.enable=true"
   - "traefik.http.routers.{name}.rule=Host(`{domain}`)"
   - "traefik.http.routers.{name}.entrypoints=web"
-  - "traefik.http.services.{name}.loadbalancer.server.port={port}"
+  - "traefik.http.services.{name}.loadbalancer.server.port=8000"
   - "traefik.docker.network=3c-network"
 ```
 
-The `traefik.docker.network=3c-network` label is important when the app container is on multiple networks — it tells Traefik which network interface to use.
+TLS is terminated at Cloudflare. Traefik only needs HTTP internally.
 
-## Ollama (Shared LLM)
+## App discovery: filesystem registry
 
-- **Container**: `ollama` on `3c-network`
-- **Model**: `qwen2.5:1.5b` (pulled once, persisted in `ollama_data` volume)
-- **Access**: `http://ollama:11434` from any container on 3c-network
-- **Memory**: 4GB limit
-- **Parallelism**: `OLLAMA_NUM_PARALLEL=4`
-- **Architecture**: ollama/ollama:latest image has ARM64 support
+There is no registry database and no `apps.json`.
 
-Apps use the Ollama API directly via httpx (no SDK). Two endpoints:
-- `/api/generate` — single-turn completion (used by vibeslopwiki)
-- `/api/chat` — multi-turn conversation with messages array (used by chatrequest)
+The panel discovers apps by scanning:
 
-## Secrets & Config
+```text
+/home/ubuntu/3c/apps/
+```
 
-| File | Contents |
-|------|----------|
-| `/home/ubuntu/3c/.env` | `CLOUDFLARE_TUNNEL_TOKEN`, `C3_GITHUB_TOKEN`, Discord bot tokens |
-| `~/.config/3c/config.toml` | Cloudflare API token + account ID, Porkbun keys, Migadu keys |
+Any child directory with one of these files is an app:
 
-The 3c panel mounts both of these at startup. Apps have their own `.env` files.
+```text
+docker-compose.yml
+docker-compose.yaml
+compose.yml
+compose.yaml
+```
 
-## 3c Panel
+The panel derives metadata from live Docker/Compose state:
 
-See [panel.md](panel.md) for full documentation. Key architectural note: the panel container mounts the Docker socket and binary, so it can run `docker` / `docker compose` commands against the host — this is how app deploy/restart/logs work from the UI.
+- domain and port from Traefik labels in the app Compose file;
+- container status from `docker compose ps`;
+- Git state from the app directory;
+- resource stats from `docker stats`.
 
-## Apps Registry
+This means app metadata should live in the app's Compose file, not in a separate registry file.
 
-No registry file — the `/home/ubuntu/3c/apps/` directory itself is the registry. Every subdirectory with its own `docker-compose.yml` is discovered live by the panel (domain/port read from its Traefik labels, status from `docker compose ps`). The directory is gitignored; each app is its own repo.
+## AI architecture
 
-## Cloudflare Resources
+3C currently has two AI stacks.
 
-- **API token** (`<redacted — see ~/.config/3c/config.toml>`): Zone Read, DNS Edit, Account Analytics, Pages Edit — **no tunnel management**
-- **vibeslop.wiki zone ID**: `a025406a6e540f3a4500dc7b9259c35b`
-- **3c.lol zone ID**: `0efa4c6449a481aaf5c101ac51edaed2`
+```text
+Lightweight apps
+   ↓
+Oracle-local Ollama
+   ↓
+qwen2.5:1.5b on CPU
+```
+
+```text
+Heavy apps / TTS apps
+   ↓
+http://tailscale:9090 on gpu-network
+   ↓
+gpu-proxy-compgate
+   ↓
+Tailscale to home PC
+   ↓
+CompGate
+   ↓
+home Ollama / Kokoro / Bark
+```
+
+See [`ai-backends.md`](ai-backends.md) and [`compgate.md`](compgate.md).
+
+## Secrets and config locations
+
+| Path | Purpose |
+|---|---|
+| `/home/ubuntu/3c/.env` | Root compose variables: Cloudflare tunnel token, GitHub token, Tailscale auth key, home GPU IP/ports |
+| `~/.config/3c/config.toml` | Cloudflare, Porkbun, Migadu API credentials for the panel |
+| `apps/{app}/.env` | Per-app secrets and runtime config |
+
+Do not commit real `.env` files. Use `.env.example` for templates.

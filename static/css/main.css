@@ -425,6 +425,26 @@ a:hover { text-decoration: underline; }
 .badge-building { color: var(--warning); border-color: var(--warning); }
 .badge-failed   { color: var(--danger);  border-color: var(--danger); }
 
+/* AI backend status */
+.ai-intro { margin: -8px 0 16px; font-size: 12px; }
+.ai-tabs { display: flex; margin-bottom: 16px; }
+.ai-tab { padding: 8px 14px; border: 1px solid var(--border); background: var(--bg-secondary); color: var(--text-secondary); font: inherit; font-size: 12px; cursor: pointer; }
+.ai-tab + .ai-tab { border-left: 0; }
+.ai-tab:hover { background: var(--bg-hover); color: var(--text-primary); }
+.ai-tab.active { background: var(--accent); border-color: var(--accent); color: var(--text-on-accent); }
+.ai-card { max-width: 760px; padding: 20px; border: 1px solid var(--border); background: var(--bg-secondary); }
+.ai-card-header { display: flex; justify-content: space-between; align-items: center; gap: 16px; }
+.ai-card-header h2 { margin: 0; font-size: 16px; }
+.ai-card > p { color: var(--text-secondary); font-size: 13px; line-height: 1.5; }
+.ai-details { margin: 18px 0 0; }
+.ai-details > div { display: grid; grid-template-columns: 150px 1fr; gap: 12px; padding: 9px 0; border-top: 1px solid var(--border); font-size: 12px; }
+.ai-details dt { color: var(--text-muted); }
+.ai-details dd { margin: 0; font-family: var(--font-mono); }
+.ai-services-title { margin: 22px 0 10px; font-size: 12px; text-transform: uppercase; letter-spacing: .08em; }
+.ai-service-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; }
+.ai-service-grid > div { display: flex; justify-content: space-between; gap: 8px; padding: 10px; border: 1px solid var(--border); font-size: 12px; text-transform: capitalize; }
+.ai-note { margin-top: 18px; font-size: 11px !important; }
+
 /* ================================================================
    Zone Context Bar
    ================================================================ */

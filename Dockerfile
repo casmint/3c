@@ -6,9 +6,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends git && rm -rf /
 WORKDIR /app
 
 COPY pyproject.toml .
+COPY panel/ ./panel/
 RUN pip install --no-cache-dir .
 
-COPY . .
+COPY static/ ./static/
 
 EXPOSE 8000
 CMD ["python", "-m", "panel"]

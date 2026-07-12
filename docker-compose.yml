@@ -24,9 +24,9 @@ services:
     networks:
       - 3c-network
 
-  ollama:
+  oracle-ollama:
     image: ollama/ollama:latest
-    container_name: ollama
+    container_name: oracle-ollama
     restart: unless-stopped
     mem_limit: 4g
     environment:
@@ -34,7 +34,99 @@ services:
     volumes:
       - ollama_data:/root/.ollama
     networks:
-      - 3c-network
+      3c-network:
+        # Transitional alias for manual callers not yet updated.
+        aliases:
+          - ollama
+
+  tailscale:
+    image: tailscale/tailscale:latest
+    container_name: tailscale
+    hostname: 3c-gpu-proxy
+    restart: unless-stopped
+    mem_limit: 128m
+    environment:
+      - TS_AUTHKEY=${TS_AUTHKEY:-}
+      - TS_STATE_DIR=/var/lib/tailscale
+      - TS_EXTRA_ARGS=--accept-dns=false
+      - TS_USERSPACE=false
+    volumes:
+      - tailscale_data:/var/lib/tailscale
+      - /dev/net/tun:/dev/net/tun
+    cap_add:
+      - NET_ADMIN
+      - NET_RAW
+    networks:
+      - gpu-network
+    ports:
+      # Loopback-only: lets host-level processes (e.g. opencode run directly
+      # over SSH, outside Docker) reach Compgate at localhost:9090 through the
+      # existing gpu-proxy-compgate forward below, without giving this VM its
+      # own tailnet identity. Bound to 127.0.0.1 so it's never reachable from
+      # the public internet, only from processes on this host.
+      - "127.0.0.1:9090:9090"
+
+  # Forwards gpu-network:11434 to the home PC's Ollama over the tailnet, so any
+  # app on gpu-network can reach it via the container name "tailscale" without
+  # itself needing tailnet access — only this pair of containers ever touches
+  # the tailscale0 interface. Set HOME_GPU_TAILSCALE_IP in .env once the home
+  # PC has joined the tailnet and its address is known.
+  gpu-proxy:
+    image: alpine/socat:latest
+    container_name: gpu-proxy
+    restart: unless-stopped
+    mem_limit: 64m
+    network_mode: "service:tailscale"
+    depends_on:
+      - tailscale
+    command:
+      - "TCP-LISTEN:11434,fork,reuseaddr"
+      - "TCP:${HOME_GPU_TAILSCALE_IP:-127.0.0.1}:11434"
+
+  # Forwards gpu-network:8880 to the home PC's Kokoro TTS server over the
+  # tailnet, same pattern as gpu-proxy above (separate container since a
+  # single socat process only handles one listen/target pair).
+  gpu-proxy-kokoro:
+    image: alpine/socat:latest
+    container_name: gpu-proxy-kokoro
+    restart: unless-stopped
+    mem_limit: 64m
+    network_mode: "service:tailscale"
+    depends_on:
+      - tailscale
+    command:
+      - "TCP-LISTEN:8880,fork,reuseaddr"
+      - "TCP:${HOME_GPU_TAILSCALE_IP:-127.0.0.1}:${HOME_GPU_KOKORO_PORT:-8880}"
+
+  # Forwards gpu-network:8881 to the home PC's Bark TTS server over the
+  # tailnet, same pattern as gpu-proxy-kokoro above.
+  gpu-proxy-bark:
+    image: alpine/socat:latest
+    container_name: gpu-proxy-bark
+    restart: unless-stopped
+    mem_limit: 64m
+    network_mode: "service:tailscale"
+    depends_on:
+      - tailscale
+    command:
+      - "TCP-LISTEN:8881,fork,reuseaddr"
+      - "TCP:${HOME_GPU_TAILSCALE_IP:-127.0.0.1}:${HOME_GPU_BARK_PORT:-8881}"
+
+  # Forwards gpu-network:9090 to Compgate (the AI gateway fronting
+  # Ollama/Kokoro/Bark on the home PC), same pattern as gpu-proxy-bark above.
+  # EldQuest and CChannel both reach it via the container name "tailscale"
+  # rather than direct OLLAMA_HOST/KOKORO_HOST/BARK_HOST connections now.
+  gpu-proxy-compgate:
+    image: alpine/socat:latest
+    container_name: gpu-proxy-compgate
+    restart: unless-stopped
+    mem_limit: 64m
+    network_mode: "service:tailscale"
+    depends_on:
+      - tailscale
+    command:
+      - "TCP-LISTEN:9090,fork,reuseaddr"
+      - "TCP:${HOME_GPU_TAILSCALE_IP:-127.0.0.1}:${HOME_GPU_COMPGATE_PORT:-9090}"
 
   panel:
     build: .
@@ -58,10 +150,14 @@ services:
       - "traefik.http.services.3c.loadbalancer.server.port=8000"
     networks:
       - 3c-network
+      - gpu-network
 
 volumes:
   ollama_data:
+  tailscale_data:
 
 networks:
   3c-network:
     name: 3c-network
+  gpu-network:
+    name: gpu-network

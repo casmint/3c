@@ -275,6 +275,7 @@ const Sidebar = {
         { emoji: '✉️',  label: 'Migadu',     route: '/email',    prefix: '/email' },
         { emoji: '🌱', label: 'Apps',       route: '/apps',     prefix: '/apps' },
         { emoji: '🖥️',  label: 'Server',     route: '/server',   prefix: '/server' },
+        { emoji: '🤖', label: 'AI',         route: '/ai',       prefix: '/ai' },
     ],
 
     cfSubs: [

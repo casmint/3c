@@ -140,6 +140,13 @@ def create_app(config: AppConfig) -> FastAPI:
                 pass
         return status
 
+    # AI backends — read-only status, intentionally free of URLs and keys.
+    from panel.api.ai import get_ai_status
+
+    @app.get("/api/ai/status")
+    async def api_ai_status():
+        return await get_ai_status()
+
     @app.post("/api/settings/test/{service}")
     async def api_settings_test(service: str):
         """Test a specific integration and return detailed result."""

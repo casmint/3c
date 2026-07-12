@@ -1,164 +1,286 @@
-# 3c Panel
+# 3C Panel
 
-The 3c panel is the control interface for the entire server, running at `3c.lol` behind Cloudflare Access (Google OAuth). It is a FastAPI + vanilla JS SPA.
+The 3C panel is a FastAPI backend plus a vanilla JavaScript single-page frontend. It runs as `3c-panel` and is routed at `https://3c.lol` through Cloudflare Tunnel and Traefik.
 
-## File Structure
+The panel has no login code. Cloudflare Access is expected to authenticate users before requests reach the container.
 
-```
-/home/ubuntu/3c/
-  Dockerfile              # python:3.11-slim, runs panel as a package
-  docker-compose.yml      # core services: cloudflared, traefik, ollama, panel
-  pyproject.toml          # panel package definition
-  notes.json              # key-value annotations (managed by panel)
-  apps/                   # one subdirectory per app (gitignored) — this IS the app registry
-  docs/                   # this documentation
-  static/                 # frontend SPA (HTML/JS/CSS, no build step)
-  panel/
-    __init__.py
-    __main__.py           # uvicorn entrypoint
-    app.py                # FastAPI route definitions (all routes)
-    config.py             # loads ~/.config/3c/config.toml
-    api/
-      apps.py             # app/container discovery (filesystem + docker compose) and git ops
-      cloudflare.py       # Cloudflare API client
-      porkbun.py          # Porkbun domain registrar API client
-      migadu.py           # Migadu email API client
+## Backend layout
+
+```text
+panel/
+  __main__.py
+  app.py
+  config.py
+  api/
+    apps.py
+    cloudflare.py
+    porkbun.py
+    migadu.py
 ```
 
-## Docker Access
+## Frontend layout
 
-The panel container has direct access to the Docker socket:
+```text
+static/
+  index.html
+  css/main.css
+  js/app.js
+  js/apps.js
+  js/zones.js
+  js/dns.js
+  js/analytics.js
+  js/redirects.js
+  js/pages.js
+  js/domains.js
+  js/email.js
+  js/settings.js
+```
+
+The frontend is intentionally no-build: no Node, no bundler, no framework.
+
+## Config
+
+The panel reads API config from:
+
+```text
+~/.config/3c/config.toml
+```
+
+Mounted into the container read-only as:
+
+```text
+/root/.config/3c/config.toml
+```
+
+Expected sections:
+
+```toml
+[cloudflare]
+api_token = "..."
+account_id = "..."
+
+[porkbun]
+api_key = "..."
+secret_api_key = "..."
+
+[migadu]
+api_key = "..."
+```
+
+Porkbun and Migadu are optional, but the UI should degrade gracefully if they are absent.
+
+## Docker control model
+
+The panel mounts:
+
 ```yaml
 volumes:
   - /var/run/docker.sock:/var/run/docker.sock
   - /usr/bin/docker:/usr/bin/docker:ro
   - /usr/libexec/docker/cli-plugins:/usr/libexec/docker/cli-plugins:ro
+  - ./apps:/app/apps
+  - ./.env:/app/.env:ro
 ```
-This lets it run `docker` and `docker compose` commands on the host, used for deploying/stopping/restarting apps.
 
-## Config (`~/.config/3c/config.toml`)
+This gives the panel host-level Docker control. Treat the panel as highly privileged. Cloudflare Access is a required security boundary, not decoration.
 
-Mounted read-only into the panel at startup. Contains:
-- Cloudflare API token + account ID
-- Porkbun API key + secret
-- Migadu email + API key
+## App discovery
 
-The panel's `config.py` loads this file. Missing sections (porkbun, migadu) are optional — those integrations are disabled if credentials are absent.
+Implemented in `panel/api/apps.py`.
 
-## App Registry — the filesystem (`apps/`)
+No `apps.json` is used.
 
-There is no registry file. Every subdirectory of `apps/` with its own `docker-compose.yml` (or `compose.yml`) *is* an app — the panel discovers apps by scanning the directory and cross-referencing `docker compose ps`/`config --format json` for live container status, domain, and port (parsed from each app's own Traefik labels). This replaced an earlier `apps.json` registry file that had drifted from reality (all real apps were deployed by hand outside it) — the filesystem can't drift from itself.
+Discovery algorithm:
 
-Root-level services (`cloudflared`, `traefik`, `panel`) are classified as **core**; anything else defined in the root `docker-compose.yml` (currently just `ollama`) is a **shared service** consumed by apps, not an app itself.
+1. Scan `BASE_DIR/apps`.
+2. Include any directory with a Compose file:
+   - `docker-compose.yml`
+   - `docker-compose.yaml`
+   - `compose.yml`
+   - `compose.yaml`
+3. Run `docker compose config --format json` in each app directory.
+4. Read Traefik labels for domain/port.
+5. Run `docker compose ps -a --format json` for live status.
+6. Run Git commands in the app directory for branch/dirty/ahead/behind/remote.
 
-## Notes (`notes.json`)
+The filesystem is the registry. If an app is absent from `/apps`, it is absent from the panel.
 
-Key-value store with namespaces, e.g. `{"dns": {"vibeslop.wiki": "some note"}}`. Persisted to disk, used by the panel frontend for user annotations on domains, apps, etc.
+## Root compose project name
 
-## API Routes
+The root compose project is pinned as:
 
-### Config & Status
-- `GET /api/config/status` — which integrations are configured (cloudflare/porkbun/migadu)
-- `GET /api/settings/status` — live connectivity check for all integrations
-- `POST /api/settings/test/{service}` — test a specific integration
-- `GET /api/cf/account-id` — return configured Cloudflare account ID
+```python
+ROOT_PROJECT = "3c"
+```
 
-### Notes
-- `GET /api/notes/{namespace}` — get all notes in a namespace
-- `PUT /api/notes/{namespace}/{key}` — set a note
-- `DELETE /api/notes/{namespace}/{key}` — delete a note
+This matters because inside the panel container the repo path is `/app`, while the host directory is `/home/ubuntu/3c`. Docker Compose would otherwise infer the wrong project name.
 
-### Cloudflare — Zones
-- `GET /api/cf/zones` — list zones (supports `?status=`, `?name=`, pagination)
-- `POST /api/cf/zones` — create a zone
-- `GET /api/cf/zones/resolve/{domain}` — find zone by domain name
-
-### Cloudflare — DNS
-- `GET /api/cf/zones/{zone_id}/dns` — list DNS records
-- `POST /api/cf/zones/{zone_id}/dns` — create DNS record
-- `PATCH /api/cf/zones/{zone_id}/dns/{record_id}` — update DNS record
-- `DELETE /api/cf/zones/{zone_id}/dns/{record_id}` — delete DNS record
-
-### Cloudflare — Analytics
-- `GET /api/cf/zones/{zone_id}/analytics?days=7` — zone traffic analytics
-
-### Cloudflare — Bulk Redirects
-- `GET /api/cf/redirects/lists` — list redirect lists
-- `GET /api/cf/redirects/lists/{list_id}/items` — list items in a redirect list
-- `POST /api/cf/redirects/lists/{list_id}/items` — add items
-- `DELETE /api/cf/redirects/lists/{list_id}/items` — delete items (body: `{item_ids: [...]}`)
-
-### Cloudflare — Pages
-- `GET /api/cf/pages/projects` — list Pages projects
-- `POST /api/cf/pages/projects` — create a Pages project
-- `POST /api/cf/pages/projects/{name}/deploy` — trigger a deployment
-- `GET /api/cf/pages/projects/{name}/deployments/{id}` — get deployment status
-
-### Porkbun — Domains
-- `GET /api/porkbun/available` — whether Porkbun credentials are configured
-- `GET /api/domains` — list all Porkbun domains with CF zone status and renewal pricing
-- `POST /api/domains/{domain}/update-ns` — update nameservers (body: `{nameservers: [...]}`)
-- `POST /api/domains/{domain}/fix-cf` — set Cloudflare-assigned NS on Porkbun automatically
-- `POST /api/porkbun/ns/{domain}` — low-level NS update
-
-### Migadu — Email
-- `GET /api/email/available` — whether Migadu is configured
-- `GET /api/email/domains` — list email domains
-- `POST /api/email/domains` — add email domain
-- `GET /api/email/domains/{domain}` — get domain details
-- `PATCH /api/email/domains/{domain}` — update domain settings
-- `GET /api/email/domains/{domain}/dns-records` — get required DNS records
-- `GET /api/email/domains/{domain}/diagnostics` — run diagnostics
-- `POST /api/email/domains/{domain}/activate` — activate domain
-- `GET /api/email/domains/{domain}/catchall` — get catch-all destination
-- `POST /api/email/domains/{domain}/catchall` — set catch-all
-- `DELETE /api/email/domains/{domain}/catchall` — clear catch-all
-- `POST /api/email/domains/{domain}/setup-dns` — auto-add Migadu DNS records to CF
-- `GET /api/email/mailboxes/{domain}` — list mailboxes
-- `POST /api/email/mailboxes/{domain}` — create mailbox
-- `PUT /api/email/mailboxes/{domain}/{local_part}` — update mailbox
-- `DELETE /api/email/mailboxes/{domain}/{local_part}` — delete mailbox
-- `GET /api/email/aliases/{domain}` — list aliases
-- `POST /api/email/aliases/{domain}` — create alias
-- `DELETE /api/email/aliases/{domain}/{local_part}` — delete alias
-- `GET /api/email/identities/{domain}/{mailbox}` — list send-as identities
-- `POST /api/email/identities/{domain}/{mailbox}` — create identity
-- `DELETE /api/email/identities/{domain}/{mailbox}/{id_local}` — delete identity
-
-### Apps — unified dashboard
-- `GET /api/apps` — `{core, shared, apps, other}`: root services classified core/shared, discovered apps (domain/port/status/containers/git), and any stray containers not accounted for elsewhere
-- `GET /api/stats` — live mem/cpu per container, keyed by container name (separate endpoint since `docker stats` takes ~2s to sample regardless of container count — frontend loads it after the initial page paint)
-- `POST /api/apps` — clone a new app: body `{name, repo, branch}`; the repo must already have its own `docker-compose.yml` following [adding-an-app.md](adding-an-app.md) — domain/port are read from it, not supplied here
-
-### App Operations (compose-based — correct for both single- and multi-container apps)
-- `POST /api/apps/{name}/deploy` — docker compose up -d --build
-- `POST /api/apps/{name}/pull-restart` — git pull + docker compose up -d --build
-- `POST /api/apps/{name}/start` — docker compose start
-- `POST /api/apps/{name}/stop` — docker compose stop
-- `POST /api/apps/{name}/restart` — docker compose restart
-- `POST /api/apps/{name}/delete` — docker compose down --remove-orphans -v + delete the app directory
-- `GET /api/apps/{name}/logs?tail=200` — logs from all containers in the app's compose project
-- `GET /api/apps/{name}/git-status` — git status for the app directory
-
-### Raw Container Control (core / shared services — single containers, not compose projects)
-- `POST /api/containers/{name}/start` — start a container
-- `POST /api/containers/{name}/stop` — stop a container
-- `POST /api/containers/{name}/restart` — restart a container
-- `GET /api/containers/{name}/logs?tail=200` — tail logs
-
-### 3c Self-Update
-- `GET /api/3c/git-status` — git status of the 3c repo itself
-- `POST /api/3c/pull-restart` — git pull + restart the panel container
-
-## Running / Updating the Panel
+Root service operations should use:
 
 ```bash
-# Rebuild and restart the panel (from /home/ubuntu/3c/)
-docker compose up -d --build panel
+docker compose -p 3c ...
+```
 
-# View panel logs
+## Core/shared/app classification
+
+`CORE_SERVICES` currently includes:
+
+```python
+{"panel", "traefik", "cloudflared"}
+```
+
+Everything else in root Compose is treated as shared infrastructure, such as:
+
+- Oracle Ollama;
+- Tailscale;
+- GPU/CompGate proxy containers.
+
+App containers are derived from app Compose projects.
+
+Anything else running on the host becomes `other`.
+
+## API surface
+
+### General
+
+| Method | Path | Purpose |
+|---|---|---|
+| `GET` | `/api/health` | Basic panel health |
+| `GET` | `/api/ai/status` | Read-only Oracle-Ollama and Tailscale-CompGate status |
+| `GET` | `/api/settings` | Configured integration availability / settings |
+| `GET` | `/api/notes/{namespace}` | Get namespaced notes |
+| `POST` | `/api/notes/{namespace}` | Save namespaced notes |
+
+### Cloudflare zones
+
+| Method | Path | Purpose |
+|---|---|---|
+| `GET` | `/api/cf/zones` | List zones |
+| `POST` | `/api/cf/zones` | Create zone |
+| `GET` | `/api/cf/zones/resolve/{domain}` | Resolve domain to zone |
+
+### DNS
+
+| Method | Path | Purpose |
+|---|---|---|
+| `GET` | `/api/cf/zones/{zone_id}/dns` | List DNS records |
+| `POST` | `/api/cf/zones/{zone_id}/dns` | Create DNS record |
+| `PATCH` | `/api/cf/zones/{zone_id}/dns/{record_id}` | Update DNS record |
+| `DELETE` | `/api/cf/zones/{zone_id}/dns/{record_id}` | Delete DNS record |
+
+### Analytics
+
+| Method | Path | Purpose |
+|---|---|---|
+| `GET` | `/api/cf/zones/{zone_id}/analytics?days=7` | Cloudflare zone analytics |
+
+### Redirects
+
+| Method | Path | Purpose |
+|---|---|---|
+| `GET` | `/api/cf/redirects/lists` | List redirect lists |
+| `GET` | `/api/cf/redirects/lists/{list_id}/items` | List redirect items |
+| `POST` | `/api/cf/redirects/lists/{list_id}/items` | Add redirect items |
+| `DELETE` | `/api/cf/redirects/lists/{list_id}/items` | Delete redirect items |
+
+### Pages
+
+| Method | Path | Purpose |
+|---|---|---|
+| `GET` | `/api/cf/pages/projects` | List Pages projects |
+| `POST` | `/api/cf/pages/projects` | Create Pages project |
+| `POST` | `/api/cf/pages/projects/{name}/deploy` | Trigger deployment |
+| `GET` | `/api/cf/pages/projects/{name}/deployments/{id}` | Deployment status |
+
+### Porkbun
+
+| Method | Path | Purpose |
+|---|---|---|
+| `GET` | `/api/porkbun/available` | Credential availability |
+| `GET` | `/api/domains` | Domain list with CF status/pricing |
+| `POST` | `/api/domains/{domain}/update-ns` | Update nameservers |
+| `POST` | `/api/domains/{domain}/fix-cf` | Set Cloudflare-assigned nameservers |
+| `POST` | `/api/porkbun/ns/{domain}` | Low-level nameserver update |
+
+### Migadu
+
+| Method | Path | Purpose |
+|---|---|---|
+| `GET` | `/api/email/available` | Credential availability |
+| `GET` | `/api/email/domains` | List email domains |
+| `POST` | `/api/email/domains` | Add email domain |
+| `GET` | `/api/email/domains/{domain}` | Domain details |
+| `PATCH` | `/api/email/domains/{domain}` | Update domain settings |
+| `GET` | `/api/email/domains/{domain}/dns-records` | Required DNS records |
+| `GET` | `/api/email/domains/{domain}/diagnostics` | Diagnostics |
+| `POST` | `/api/email/domains/{domain}/activate` | Activate domain |
+| `GET` | `/api/email/domains/{domain}/catchall` | Get catch-all |
+| `POST` | `/api/email/domains/{domain}/catchall` | Set catch-all |
+| `DELETE` | `/api/email/domains/{domain}/catchall` | Clear catch-all |
+| `POST` | `/api/email/domains/{domain}/setup-dns` | Add Migadu DNS records to Cloudflare |
+| `GET` | `/api/email/mailboxes/{domain}` | List mailboxes |
+| `POST` | `/api/email/mailboxes/{domain}` | Create mailbox |
+| `PUT` | `/api/email/mailboxes/{domain}/{local_part}` | Update mailbox |
+| `DELETE` | `/api/email/mailboxes/{domain}/{local_part}` | Delete mailbox |
+| `GET` | `/api/email/aliases/{domain}` | List aliases |
+| `POST` | `/api/email/aliases/{domain}` | Create alias |
+| `DELETE` | `/api/email/aliases/{domain}/{local_part}` | Delete alias |
+| `GET` | `/api/email/identities/{domain}/{mailbox}` | List identities |
+| `POST` | `/api/email/identities/{domain}/{mailbox}` | Create identity |
+| `DELETE` | `/api/email/identities/{domain}/{mailbox}/{id_local}` | Delete identity |
+
+### Apps
+
+| Method | Path | Purpose |
+|---|---|---|
+| `GET` | `/api/apps` | Return `{core, shared, apps, other}` |
+| `GET` | `/api/stats` | Live memory/CPU stats keyed by container name |
+| `POST` | `/api/apps` | Clone a new app repo into `apps/{name}` |
+| `POST` | `/api/apps/{name}/deploy` | `docker compose up -d --build` |
+| `POST` | `/api/apps/{name}/pull-restart` | Git pull, then rebuild/redeploy |
+| `POST` | `/api/apps/{name}/start` | `docker compose start` |
+| `POST` | `/api/apps/{name}/stop` | `docker compose stop` |
+| `POST` | `/api/apps/{name}/restart` | `docker compose restart` |
+| `POST` | `/api/apps/{name}/delete` | Compose down, remove volumes/orphans, delete directory |
+| `GET` | `/api/apps/{name}/logs?tail=200` | Logs from all app containers |
+| `GET` | `/api/apps/{name}/git-status` | Git state for app directory |
+
+### Raw containers
+
+For core/shared/other containers that are not managed as app Compose projects:
+
+| Method | Path | Purpose |
+|---|---|---|
+| `POST` | `/api/containers/{name}/start` | Start container |
+| `POST` | `/api/containers/{name}/stop` | Stop container |
+| `POST` | `/api/containers/{name}/restart` | Restart container |
+| `GET` | `/api/containers/{name}/logs?tail=200` | Container logs |
+
+### 3C self-update
+
+| Method | Path | Purpose |
+|---|---|---|
+| `GET` | `/api/3c/git-status` | Git state of the 3C repo |
+| `POST` | `/api/3c/pull-restart` | Git pull and restart panel if needed |
+
+## Run / update commands
+
+```bash
+# Rebuild and restart panel
+cd /home/ubuntu/3c
+docker compose -p 3c up -d --build panel
+
+# Logs
 docker logs 3c-panel -f
 
-# Restart all core services
-docker compose up -d
+# Restart root services
+cd /home/ubuntu/3c
+docker compose -p 3c up -d
 ```
+
+## Known panel gaps
+
+- No first-class AI Backend status page yet.
+- Container health is mostly process-level, not app-level readiness.
+- Docker socket access means panel compromise is host compromise.
+- App secrets are not fully standardized across all apps.
