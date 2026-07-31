@@ -39,3 +39,8 @@ notes.json
 
 # Claude local settings (keep CLAUDE.md but not local overrides)
 .claude/settings.local.json
+
+# Local misc files
+misc/
+# Runtime databases
+data/*.db
